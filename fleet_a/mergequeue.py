@@ -152,6 +152,10 @@ class MergeQueue:
                 return sha
         return None
 
+    def landed_tasks(self, run_id: str) -> dict[str, dict[str, object]]:
+        return landed_tasks(self.git, self.target_ref, run_id)
+
+
     def verify(self, path: Path) -> tuple[bool, str]:
         if not self.verify_command:
             return True, "no verify command configured"
@@ -169,3 +173,29 @@ class MergeQueue:
             return False, f"verify command could not start: {exc}"
         output = _tail(proc.stdout + "\n" + proc.stderr)
         return proc.returncode == 0, output
+
+
+def landed_tasks(git: Git, target_ref: str, run_id: str) -> dict[str, dict[str, object]]:
+    """Every task of ``run_id`` whose change is on ``target_ref``: {task: {attempt, commit}}.
+
+    This reads git, not the event log, so it is the authority after a coordinator crash: a merge
+    can land in the instant between the atomic ``update-ref`` and the ``done`` transition being
+    logged. Same exact-trailer rules as ``MergeQueue.find_landed``. Read-only.
+    """
+    out = git.run(
+        "log",
+        target_ref,
+        f"--format={_TRAILER_FORMAT}",
+        "--fixed-strings",
+        f"--grep=Fleet-Run: {run_id}",
+    ).stdout
+    landed: dict[str, dict[str, object]] = {}
+    for record in out.split(_RECORD):
+        fields = record.strip("\n").split(_FIELD)
+        if len(fields) != 4:
+            continue
+        sha, runs, tasks, attempts = (f.split(_VALUE) for f in fields)
+        if runs != [run_id] or len(tasks) != 1 or len(attempts) != 1 or not attempts[0].isdigit():
+            continue
+        landed.setdefault(tasks[0], {"attempt": int(attempts[0]), "commit": sha[0]})
+    return dict(sorted(landed.items()))

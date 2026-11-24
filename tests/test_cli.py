@@ -116,3 +116,30 @@ def test_plan_command_with_stand_in_planner(repo, tmp_path, capsys):
     plan = json.loads(out_path.read_text())
     assert plan["id"] == "thing" and plan["goal"] == "Add a thing" and plan["tasks"][0]["write_scope"] == ["src/"]
     assert "planned 1 tasks" in capsys.readouterr().err
+
+
+def test_landed_command_finds_a_merge_the_log_never_recorded(repo, tmp_path, capsys):
+    """Crash window: the integrator landed, the coordinator died before logging done."""
+    from fleet_a.git import Git
+    from fleet_a.mergequeue import MergeQueue
+    from fleet_a.model import Assignment, Role
+    from fleet_a.prompts import commit_message
+    from fleet_a.workspaces import Workspaces
+    from conftest import spec
+
+    g = Git(repo)
+    ws = Workspaces(g, tmp_path / "wt")
+    wt = ws.create_worktree("T1", 1, 7, "main")
+    (wt.path / "src" / "t1.py").write_text("T1 = 1\n")
+    a = Assignment(spec("T1"), Role.WORKER, "worker-1", 7, 1, 60, 1.0, "main", run_id="demo-0badc0de")
+    commit = ws.squash_commit(wt, commit_message(a, "added t1"))
+    ws.remove(wt)
+    MergeQueue(g, ws, "main", [], 60).integrate("demo-0badc0de", "T1", 1, 8, commit, ("src/",))
+    before = set(p.name for p in repo.parent.iterdir())
+    assert main(["landed", "--repo", str(repo), "--run", "demo-0badc0de"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["count"] == 1 and out["landed"]["T1"]["attempt"] == 1
+    assert out["landed"]["T1"]["commit"] == git(repo, "rev-parse", "main")
+    assert set(p.name for p in repo.parent.iterdir()) == before  # read-only: creates nothing
+    assert main(["landed", "--repo", str(repo), "--run", "other-run"]) == 0
+    assert json.loads(capsys.readouterr().out)["count"] == 0

@@ -403,7 +403,10 @@ The cheapest way to raise the ceiling is a faster `verify_command` (for example,
 
 **Known limits of v1.**
 
-- The coordinator keeps state in memory. If it dies, start a new run for the remaining tasks; changes already landed are on the target branch, and the old log shows exactly which. The new run gets a new run id, so it neither inherits the old run's fences nor reconciles against its commits: remove tasks that already landed from the plan, and remove them from the `deps` of the remaining tasks (those dependencies are already met on the target branch, and a `deps` entry naming a task outside the plan fails validation).
+- The coordinator keeps state in memory. If it dies, start a new run for the remaining tasks. The new run gets a new run id, so it neither inherits the old run's fences nor reconciles against its commits. Decide which tasks landed from git, not from the old log: a merge can land in the instant between the integrator's atomic `update-ref` and the `done` transition being logged, so the log can show a landed task as still merging.
+  1. Find the old run id in the run summary (`"run"`) or in the old log's `plan` event.
+  2. `fleet_a landed --repo R --run <old run id>` lists every task of that run whose commit is on the target branch, read from the exact `Fleet-Run`/`Fleet-Task`/`Fleet-Attempt` trailers.
+  3. Remove those tasks from the plan, and remove them from the `deps` of the remaining tasks: those dependencies are already met on the target branch, and a `deps` entry naming a task outside the plan fails validation.
 - One repository and one target branch per run.
 - No batching of merges, so merge time bounds throughput (above).
 - Semantic conflicts between tasks with disjoint scopes are caught only by the verification command.
