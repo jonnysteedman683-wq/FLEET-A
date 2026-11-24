@@ -11,7 +11,7 @@ from .dag import TaskGraph
 from .errors import FleetError, PlanError
 from .executors import ExecRequest, Executor
 from .model import Plan, micros_to_usd
-from .prompts import PLAN_SCHEMA, PLANNER_SYSTEM, planner_prompt
+from .prompts import PLANNER_SYSTEM, plan_schema, planner_prompt
 
 
 def slugify(text: str, limit: int = 40) -> str:
@@ -29,14 +29,15 @@ def plan_goal(
     """Return (plan, cost_usd). Raises PlanError if the model's plan does not validate."""
     if not goal.strip():
         raise PlanError("goal must not be empty")
+    tags = config.plannable_capabilities()
     result = executor.run(
         ExecRequest(
             cwd=Path(repo),
-            prompt=planner_prompt(goal),
+            prompt=planner_prompt(goal, tags),
             system_append=PLANNER_SYSTEM,
             profile=config.models["planner"],
             budget_usd=micros_to_usd(config.planner_budget),
-            json_schema=PLAN_SCHEMA,
+            json_schema=plan_schema(tags),
         ),
         threading.Event(),
     )
@@ -47,4 +48,7 @@ def plan_goal(
     data["goal"] = goal
     plan = Plan.from_dict(data)
     TaskGraph(plan.tasks)
+    gaps = config.capability_gaps(plan.tasks)
+    if gaps:
+        raise PlanError("planner produced tasks no configured agent can take: " + "; ".join(gaps))
     return plan, result.cost_usd

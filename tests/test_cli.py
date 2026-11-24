@@ -143,3 +143,60 @@ def test_landed_command_finds_a_merge_the_log_never_recorded(repo, tmp_path, cap
     assert set(p.name for p in repo.parent.iterdir()) == before  # read-only: creates nothing
     assert main(["landed", "--repo", str(repo), "--run", "other-run"]) == 0
     assert json.loads(capsys.readouterr().out)["count"] == 0
+
+
+UNSERVABLE_PLAN = {
+    "id": "caps",
+    "goal": "g",
+    "tasks": [{"id": "t1", "title": "T", "description": "D", "write_scope": ["src/"], "capabilities": ["git", "python"]}],
+}
+
+
+def test_validate_and_run_refuse_tasks_no_agent_can_take(repo, tmp_path, capsys):
+    """The first live run on FLEET-B stalled at once: the planner tagged a task with
+    capabilities no configured agent had. Both commands now refuse such a plan up front."""
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(UNSERVABLE_PLAN))
+    assert main(["validate", str(plan)]) == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["unservable"] == [
+        "task t1: no worker pool has capabilities ['git', 'python']",
+        "task t1: no reviewer pool has capabilities ['git', 'python']",
+    ]
+    events = tmp_path / "events.jsonl"
+    code = main(["run", "--repo", str(repo), "--plan", str(plan), "--events", str(events), "--worktrees", str(tmp_path / "wt")])
+    assert code == 1 and "refusing to start" in capsys.readouterr().err
+    assert not events.exists() and not (tmp_path / "wt").exists()
+
+
+def _recording_planner(tmp_path, capabilities):
+    binary = tmp_path / "claude"
+    record = tmp_path / "planner-call.json"
+    binary.write_text(
+        "#!" + sys.executable + "\n"
+        "import json, sys\n"
+        "args = sys.argv[1:]\n"
+        "prompt = sys.stdin.read()\n"
+        f"json.dump({{'schema': json.loads(args[args.index('--json-schema') + 1]), 'prompt': prompt}}, open({str(record)!r}, 'w'))\n"
+        "plan = {'id': 'x', 'goal': 'g', 'tasks': [{'id': 't1', 'title': 'T', 'description': 'D',"
+        f" 'acceptance': ['works'], 'deps': [], 'write_scope': ['src/'], 'capabilities': {capabilities!r}}}]}}\n"
+        "print(json.dumps({'is_error': False, 'result': '', 'total_cost_usd': 0.1, 'structured_output': plan}))\n"
+    )
+    binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+    return binary, record
+
+
+def test_planner_is_told_the_fleets_capability_tags(repo, tmp_path, capsys):
+    binary, record = _recording_planner(tmp_path, [])
+    assert main(["plan", "--repo", str(repo), "--goal", "g", "--out", str(tmp_path / "p.json"), "--claude", str(binary)]) == 0
+    seen = json.loads(record.read_text())
+    caps = seen["schema"]["properties"]["tasks"]["items"]["properties"]["capabilities"]
+    assert caps == {"type": "array", "maxItems": 0}
+    assert "defines no capability tags" in seen["prompt"]
+
+
+def test_planner_output_no_agent_can_take_is_rejected(repo, tmp_path, capsys):
+    binary, _ = _recording_planner(tmp_path, ["git", "python"])
+    out = tmp_path / "p.json"
+    assert main(["plan", "--repo", str(repo), "--goal", "g", "--out", str(out), "--claude", str(binary)]) == 1
+    assert "no configured agent can take" in capsys.readouterr().err and not out.exists()
