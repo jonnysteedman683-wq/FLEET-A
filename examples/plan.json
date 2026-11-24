@@ -1,0 +1,73 @@
+{
+  "id": "rate-limiter",
+  "goal": "Add per-client rate limiting to the public HTTP API, configurable per route, with metrics and documentation.",
+  "tasks": [
+    {
+      "id": "limiter-core",
+      "title": "Token-bucket limiter",
+      "description": "Implement a thread-safe token-bucket rate limiter keyed by client id, with injectable clock, in src/ratelimit/. No framework dependencies.",
+      "acceptance": [
+        "TokenBucket(capacity, refill_per_s, clock) allows exactly `capacity` requests in a burst",
+        "Tokens refill continuously at refill_per_s and never exceed capacity",
+        "Concurrent acquire() from 16 threads never over-admits (test included)",
+        "Unit tests in tests/ratelimit/ pass"
+      ],
+      "write_scope": ["src/ratelimit/", "tests/ratelimit/"],
+      "capabilities": ["python"],
+      "priority": 2
+    },
+    {
+      "id": "limiter-config",
+      "title": "Rate-limit settings",
+      "description": "Add typed per-route rate-limit settings (capacity, refill rate, burst override) loaded from the existing settings module, with defaults that preserve current behaviour.",
+      "acceptance": [
+        "Settings validate capacity >= 1 and refill > 0, with clear errors",
+        "Routes without settings are unlimited",
+        "Tests cover defaults, overrides and invalid values"
+      ],
+      "write_scope": ["src/config/ratelimit.py", "tests/config/test_ratelimit.py"],
+      "capabilities": ["python"],
+      "priority": 1
+    },
+    {
+      "id": "api-middleware",
+      "title": "HTTP middleware",
+      "description": "Enforce the limiter in the API middleware chain: identify the client, look up the route's settings, reject over-limit requests with 429 and a Retry-After header.",
+      "acceptance": [
+        "Over-limit requests get 429 with an integer Retry-After header",
+        "Unlimited routes are untouched",
+        "Integration tests cover allowed, limited and recovered clients"
+      ],
+      "deps": ["limiter-core", "limiter-config"],
+      "write_scope": ["src/api/middleware/", "tests/api/test_rate_limit.py"],
+      "capabilities": ["python"],
+      "priority": 1
+    },
+    {
+      "id": "limiter-metrics",
+      "title": "Metrics",
+      "description": "Export counters for allowed and rejected requests per route and a gauge of active buckets.",
+      "acceptance": [
+        "ratelimit_requests_total{route,outcome} increments on every decision",
+        "ratelimit_active_buckets reports the live bucket count",
+        "Tests assert metric values after a scripted burst"
+      ],
+      "deps": ["limiter-core"],
+      "write_scope": ["src/metrics/ratelimit.py", "tests/metrics/test_ratelimit.py"],
+      "capabilities": ["python"]
+    },
+    {
+      "id": "limiter-docs",
+      "title": "Operator documentation",
+      "description": "Document how rate limiting works, how to configure it per route, what clients see when limited, and which metrics to alert on.",
+      "acceptance": [
+        "docs/rate-limiting.md covers configuration, client behaviour and metrics",
+        "Every setting name matches the code"
+      ],
+      "deps": ["api-middleware", "limiter-metrics"],
+      "write_scope": ["docs/rate-limiting.md"],
+      "max_attempts": 2,
+      "attempt_budget_usd": "1.00"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fleet-a"
+version = "1.0.0"
+description = "A fleet of autonomous coding agents with a fenced, budgeted, auditable control plane"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+fleet-a = "fleet_a.cli:main"
+
+[tool.setuptools]
+packages = ["fleet_a"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

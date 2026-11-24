@@ -1,0 +1,29 @@
+{
+  "target_branch": "main",
+  "fleet_budget_usd": "500",
+  "run_budget_usd": "60",
+  "review_budget_usd": "1.50",
+  "planner_budget_usd": "5.00",
+  "triage_budget_usd": "0.05",
+  "triage_threshold_chars": 6000,
+  "lease_ttl_s": {"worker": 900, "reviewer": 600, "integrator": 600},
+  "max_concurrent": {"worker": 4, "reviewer": 2, "integrator": 1},
+  "max_infra_retries": 3,
+  "aging_interval_s": 600,
+  "verify_command": ["python3", "-m", "pytest", "-q"],
+  "verify_timeout_s": 1200,
+  "agents": [
+    {"role": "worker", "count": 4, "capabilities": ["python"]},
+    {"role": "reviewer", "count": 2, "capabilities": ["python"]},
+    {"role": "integrator", "count": 1}
+  ],
+  "models": {
+    "planner": {"model": "claude-opus-5-5", "effort": "high"},
+    "worker": {"model": "claude-sonnet-5-5", "effort": "medium"},
+    "reviewer": {"model": "claude-opus-5-5", "effort": "high"},
+    "triage": {"model": "claude-haiku-5-5", "effort": "low"}
+  },
+  "git_name": "FLEET-A",
+  "git_email": "fleet-a@localhost",
+  "poll_interval_s": 2.0
+}
