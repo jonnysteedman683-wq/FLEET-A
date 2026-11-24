@@ -85,7 +85,7 @@ A **plan** is `{id, goal, tasks[]}`. A **task** (`TaskSpec`, `model.py`):
 | `acceptance` | string[] | concrete, testable criteria shown to worker and reviewer |
 | `deps` | id[] | must exist; no self-edges, duplicates or cycles (cycle reported as a path) |
 | `write_scope` | path[] | non-empty; grammar in 4.2 |
-| `capabilities` | string[] | an agent must have all of them to take the task |
+| `capabilities` | string[] | an agent must have all of them to take the task; `validate` and `run` reject a plan with a task that no worker pool and no reviewer pool can take, and the planner may use only tags that some worker pool and some reviewer pool carry |
 | `priority` | int | higher first (section 7) |
 | `max_attempts` | int 1..20 | default 3 |
 | `attempt_budget_usd` | decimal string | reserved per worker attempt, default "2.00" |

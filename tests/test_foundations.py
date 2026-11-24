@@ -337,3 +337,38 @@ def test_plan_requires_tasks():
     with pytest.raises(PlanError):
         Plan(id="p", goal="", tasks=())
     assert plan_of(spec("a")).task("a").id == "a"
+
+
+# ------------------------------------------------------------------------ capability coverage
+
+
+def test_capability_gaps_and_plannable_tags():
+    from fleet_a.config import AgentPool
+    from fleet_a.prompts import plan_schema
+
+    cfg = FleetConfig(
+        agents=(
+            AgentPool(Role.WORKER, 2, frozenset({"python", "git"})),
+            AgentPool(Role.WORKER, 1, frozenset({"rust"}), prefix="rusty"),
+            AgentPool(Role.REVIEWER, 1, frozenset({"python", "git"})),
+            AgentPool(Role.INTEGRATOR, 1),
+        )
+    )
+    assert cfg.plannable_capabilities() == frozenset({"python", "git"})
+    ok = spec("ok", capabilities=frozenset({"python"}))
+    no_reviewer = spec("rs", capabilities=frozenset({"rust"}))
+    nobody = spec("go", capabilities=frozenset({"go"}))
+    gaps = cfg.capability_gaps([ok, no_reviewer, nobody])
+    assert gaps == [
+        "task rs: no reviewer pool has capabilities ['rust']",
+        "task go: no worker pool has capabilities ['go']",
+        "task go: no reviewer pool has capabilities ['go']",
+    ]
+    assert FleetConfig().plannable_capabilities() == frozenset()
+    assert FleetConfig().capability_gaps([ok]) == [
+        "task ok: no worker pool has capabilities ['python']",
+        "task ok: no reviewer pool has capabilities ['python']",
+    ]
+    caps = plan_schema(["python", "git"])["properties"]["tasks"]["items"]["properties"]["capabilities"]
+    assert caps == {"type": "array", "items": {"type": "string", "enum": ["git", "python"]}}
+    assert plan_schema([])["properties"]["tasks"]["items"]["properties"]["capabilities"] == {"type": "array", "maxItems": 0}

@@ -6,8 +6,9 @@ everything task-specific goes in the user prompt.
 
 from __future__ import annotations
 
+import copy
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from .model import Assignment, TaskSpec
 from .scopes import WHOLE_REPO
@@ -114,6 +115,18 @@ PLAN_SCHEMA: Mapping[str, Any] = {
 }
 
 
+def plan_schema(capabilities: Iterable[str]) -> dict[str, Any]:
+    """PLAN_SCHEMA with task capabilities restricted to tags the fleet's agents actually carry."""
+    tags = sorted(set(capabilities))
+    schema = copy.deepcopy(dict(PLAN_SCHEMA))
+    schema["properties"]["tasks"]["items"]["properties"]["capabilities"] = (
+        {"type": "array", "items": {"type": "string", "enum": tags}}
+        if tags
+        else {"type": "array", "maxItems": 0}
+    )
+    return schema
+
+
 def _bullets(items: Sequence[str], empty: str = "(none)") -> str:
     return "\n".join(f"- {item}" for item in items) if items else empty
 
@@ -166,8 +179,16 @@ def reviewer_prompt(assignment: Assignment) -> str:
     )
 
 
-def planner_prompt(goal: str) -> str:
-    return f"GOAL:\n{goal.strip()}\n\nRead the repository, then return the plan."
+def planner_prompt(goal: str, capabilities: Iterable[str] = ()) -> str:
+    tags = sorted(set(capabilities))
+    if tags:
+        caps = (
+            "CAPABILITY TAGS this fleet's agents carry: " + ", ".join(tags) + ". "
+            "A task's capabilities must use only these; leave them empty unless the task truly needs one."
+        )
+    else:
+        caps = "This fleet defines no capability tags: leave every task's capabilities empty."
+    return f"GOAL:\n{goal.strip()}\n\n{caps}\n\nRead the repository, then return the plan."
 
 
 def triage_prompt(task: TaskSpec, feedback: str) -> str:

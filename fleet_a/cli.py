@@ -52,6 +52,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         for t in plan.tasks
     }
     total = sum(budgets.values())
+    gaps = config.capability_gaps(plan.tasks)
     _emit(
         {
             "plan": plan.id,
@@ -61,6 +62,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
             "worst_case_spend_usd": micros_to_usd(total),
             "run_budget_usd": micros_to_usd(config.run_budget),
             "fits_run_budget": total <= config.run_budget,
+            "unservable": gaps,
         }
     )
     if total > config.run_budget:
@@ -69,6 +71,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
             f"{format_usd(config.run_budget)}; the run stalls if it is spent",
             file=sys.stderr,
         )
+    if gaps:
+        print("error: " + "; ".join(gaps), file=sys.stderr)
+        return 1
     return 0
 
 
@@ -121,6 +126,11 @@ def build_fleet(
 def cmd_run(args: argparse.Namespace) -> int:
     config = _load_config(args.config)
     plan = Plan.from_dict(_load_json(args.plan))
+    gaps = config.capability_gaps(plan.tasks)
+    if gaps:
+        raise FleetError(
+            "refusing to start: " + "; ".join(gaps) + ". Fix the plan's capabilities or the config's agents"
+        )
     repo = Path(args.repo).resolve()
     worktrees = Path(args.worktrees).resolve() if args.worktrees else repo.parent / f".fleet-a-{plan.id}"
     events_path = Path(args.events) if args.events else worktrees / "events.jsonl"

@@ -7,10 +7,10 @@ default.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, replace
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from .errors import ConfigError
-from .model import ID_PATTERN, Role, usd_to_micros
+from .model import ID_PATTERN, Role, TaskSpec, usd_to_micros
 
 EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 PERMISSION_MODES = frozenset({"acceptEdits", "auto", "manual", "dontAsk", "plan"})
@@ -252,6 +252,29 @@ class FleetConfig:
 
     def default_task_budget(self, attempt_budget: int, max_attempts: int) -> int:
         return max_attempts * (attempt_budget + self.review_budget)
+
+    def _pool_tags(self, role: Role) -> frozenset[str]:
+        return frozenset().union(*(p.capabilities for p in self.agents if p.role is role and p.count > 0))
+
+    def plannable_capabilities(self) -> frozenset[str]:
+        """Tags carried by some worker pool and some reviewer pool: the only tags a plan may use."""
+        return self._pool_tags(Role.WORKER) & self._pool_tags(Role.REVIEWER)
+
+    def capability_gaps(self, tasks: Iterable[TaskSpec]) -> list[str]:
+        """One message per task that no configured worker pool, or no reviewer pool, can take.
+
+        A task with a gap can never be dispatched, so a run containing one would stall at once.
+        """
+        gaps = []
+        for task in tasks:
+            for role in (Role.WORKER, Role.REVIEWER):
+                if not any(
+                    p.role is role and p.count > 0 and task.capabilities <= p.capabilities for p in self.agents
+                ):
+                    gaps.append(
+                        f"task {task.id}: no {role.value} pool has capabilities {sorted(task.capabilities)}"
+                    )
+        return gaps
 
 
 def _role_map(raw: Any, cast: type) -> dict[Role, Any]:
