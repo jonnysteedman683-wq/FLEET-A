@@ -33,7 +33,7 @@ def plan_goal(
     result = executor.run(
         ExecRequest(
             cwd=Path(repo),
-            prompt=planner_prompt(goal, tags),
+            prompt=planner_prompt(goal, config.plannable_tag_sets()),
             system_append=PLANNER_SYSTEM,
             profile=config.models["planner"],
             budget_usd=micros_to_usd(config.planner_budget),

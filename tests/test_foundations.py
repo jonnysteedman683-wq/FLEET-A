@@ -372,3 +372,36 @@ def test_capability_gaps_and_plannable_tags():
     caps = plan_schema(["python", "git"])["properties"]["tasks"]["items"]["properties"]["capabilities"]
     assert caps == {"type": "array", "items": {"type": "string", "enum": ["git", "python"]}}
     assert plan_schema([])["properties"]["tasks"]["items"]["properties"]["capabilities"] == {"type": "array", "maxItems": 0}
+
+
+def test_planner_learns_which_tags_combine():
+    """Gitar on #4: tags from two different worker pools must not be offered as one combination."""
+    from fleet_a.config import AgentPool
+    from fleet_a.prompts import planner_prompt
+
+    cfg = FleetConfig(
+        agents=(
+            AgentPool(Role.WORKER, 1, frozenset({"python"}), prefix="py"),
+            AgentPool(Role.WORKER, 1, frozenset({"rust"}), prefix="rs"),
+            AgentPool(Role.REVIEWER, 1, frozenset({"python", "rust"})),
+            AgentPool(Role.INTEGRATOR, 1),
+        )
+    )
+    assert cfg.plannable_capabilities() == frozenset({"python", "rust"})
+    assert cfg.plannable_tag_sets() == [frozenset({"python"}), frozenset({"rust"})]
+    assert cfg.capability_gaps([spec("both", capabilities=frozenset({"python", "rust"}))]) == [
+        "task both: no worker pool has capabilities ['python', 'rust']"
+    ]
+    prompt = planner_prompt("g", cfg.plannable_tag_sets())
+    assert "subset of ONE of these sets: {python}; {rust}" in prompt
+    wide = FleetConfig(
+        agents=(
+            AgentPool(Role.WORKER, 1, frozenset({"git", "python"})),
+            AgentPool(Role.REVIEWER, 1, frozenset({"git", "python", "sql"})),
+            AgentPool(Role.INTEGRATOR, 1),
+        )
+    )
+    assert wide.plannable_tag_sets() == [frozenset({"git", "python"})]
+    assert set().union(*wide.plannable_tag_sets()) == wide.plannable_capabilities()
+    assert FleetConfig().plannable_tag_sets() == []
+    assert "defines no capability tags" in planner_prompt("g", [])

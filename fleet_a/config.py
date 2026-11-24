@@ -260,6 +260,19 @@ class FleetConfig:
         """Tags carried by some worker pool and some reviewer pool: the only tags a plan may use."""
         return self._pool_tags(Role.WORKER) & self._pool_tags(Role.REVIEWER)
 
+    def plannable_tag_sets(self) -> list[frozenset[str]]:
+        """The largest tag combinations one task can carry and still be served.
+
+        A task can be taken only if a single worker pool and a single reviewer pool each carry all
+        of its tags, so its tags must be a subset of some ``worker & reviewer`` intersection. The
+        union of these sets equals ``plannable_capabilities()``; the sets say which tags combine.
+        """
+        workers = [p.capabilities for p in self.agents if p.role is Role.WORKER and p.count > 0]
+        reviewers = [p.capabilities for p in self.agents if p.role is Role.REVIEWER and p.count > 0]
+        pairs = {frozenset(w & r) for w in workers for r in reviewers} - {frozenset()}
+        maximal = [s for s in pairs if not any(s < other for other in pairs)]
+        return sorted(maximal, key=lambda s: sorted(s))
+
     def capability_gaps(self, tasks: Iterable[TaskSpec]) -> list[str]:
         """One message per task that no configured worker pool, or no reviewer pool, can take.
 

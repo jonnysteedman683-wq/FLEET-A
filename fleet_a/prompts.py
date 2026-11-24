@@ -179,12 +179,14 @@ def reviewer_prompt(assignment: Assignment) -> str:
     )
 
 
-def planner_prompt(goal: str, capabilities: Iterable[str] = ()) -> str:
-    tags = sorted(set(capabilities))
-    if tags:
+def planner_prompt(goal: str, tag_sets: Iterable[Iterable[str]] = ()) -> str:
+    sets = [sorted(set(s)) for s in tag_sets if s]
+    if sets:
         caps = (
-            "CAPABILITY TAGS this fleet's agents carry: " + ", ".join(tags) + ". "
-            "A task's capabilities must use only these; leave them empty unless the task truly needs one."
+            "CAPABILITY TAGS: one agent pool must carry all of a task's tags, so a task's capabilities "
+            "must be a subset of ONE of these sets: "
+            + "; ".join("{" + ", ".join(s) + "}" for s in sets)
+            + ". Leave capabilities empty unless the task truly needs a tag."
         )
     else:
         caps = "This fleet defines no capability tags: leave every task's capabilities empty."
