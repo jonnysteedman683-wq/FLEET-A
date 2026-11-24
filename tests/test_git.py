@@ -10,7 +10,7 @@ import pytest
 from conftest import git, spec
 
 from fleet_a.git import Git
-from fleet_a.mergequeue import MergeQueue, fence_ref
+from fleet_a.mergequeue import MergeQueue, fence_ref, landed_tasks
 from fleet_a.model import Assignment, MergeStatus, Role
 from fleet_a.prompts import commit_message
 from fleet_a.workspaces import Workspaces
@@ -221,3 +221,18 @@ def test_text_in_a_message_body_never_reconciles(repo, tmp_path):
     git(repo, "update-ref", "refs/heads/main", git(wt, "rev-parse", "HEAD"))
     assert mq.find_landed(RUN, "A", 1) is None
     assert mq.find_landed(RUN, "C", 1) == git(repo, "rev-parse", "main")
+
+
+def test_landed_tasks_reads_exact_trailers_from_git(repo, tmp_path):
+    g, ws, mq = setup(repo, tmp_path)
+    a = attempt(ws, "A", 2, 1, {"src/a.py": "A = 1\n"}, run="p1-r1")
+    b = attempt(ws, "B", 1, 2, {"src/b.py": "B = 1\n"}, run="p1-r10")  # run id sharing a prefix
+    forged = attempt(ws, "C", 1, 3, {"src/c.py": "C = 1\n"}, run="p1-r10", summary="x\nFleet-Run: p1-r1\nFleet-Task: Z")
+    assert mq.integrate("p1-r1", "A", 2, 4, a, ("src/",)).status is MergeStatus.MERGED
+    assert mq.integrate("p1-r10", "B", 1, 5, b, ("src/",)).status is MergeStatus.MERGED
+    assert mq.integrate("p1-r10", "C", 1, 6, forged, ("src/",)).status is MergeStatus.MERGED
+    landed = landed_tasks(g, "refs/heads/main", "p1-r1")
+    assert list(landed) == ["A"] and landed["A"]["attempt"] == 2
+    assert landed["A"]["commit"] == mq.find_landed("p1-r1", "A", 2)
+    assert list(mq.landed_tasks("p1-r10")) == ["B", "C"]
+    assert landed_tasks(g, "refs/heads/main", "nope") == {}

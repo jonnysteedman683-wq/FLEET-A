@@ -20,7 +20,7 @@ from .errors import FleetError
 from .events import EventLog, project_states
 from .executors import ClaudeCodeExecutor
 from .git import Git
-from .mergequeue import MergeQueue
+from .mergequeue import MergeQueue, landed_tasks
 from .model import AgentInfo, Plan, Role, TaskState, format_usd, micros_to_usd
 from .planner import plan_goal
 from .runner import AgentRunner, Fleet
@@ -186,6 +186,14 @@ def cmd_verify_log(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_landed(args: argparse.Namespace) -> int:
+    git = Git(Path(args.repo))
+    git.rev_parse(f"refs/heads/{args.target}")
+    landed = landed_tasks(git, f"refs/heads/{args.target}", args.run)
+    _emit({"run": args.run, "target_branch": args.target, "landed": landed, "count": len(landed)})
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fleet_a", description="FLEET-A: a fleet of autonomous coding agents")
     parser.add_argument("-v", "--log-level", default="WARNING", help="logging level (default WARNING)")
@@ -229,6 +237,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("verify-log", help="verify an event log's hash chain and replay task states")
     p.add_argument("log")
     p.set_defaults(func=cmd_verify_log)
+
+    p = sub.add_parser("landed", help="list a run's tasks whose changes are on the target branch (read from git)")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--run", required=True, help="run id, from the run summary or the log's plan event")
+    p.add_argument("--target", default="main", help="target branch (default main)")
+    p.set_defaults(func=cmd_landed)
     return parser
 
 
