@@ -24,6 +24,10 @@ Section numbers are stable; code comments and tests refer to them.
 
 ## 2. Topology
 
+![One task's path through FLEET-A: (1) a worker takes a lease and fencing token, (2) submits one squashed commit on its own branch, (3) a different agent reviews the diff and (4) approves, (5) the integrator claims the task's fence and lands the rebased, tested commit on main in one atomic update. A late report with an expired token is rejected.](fleet-a-task-flow.svg)
+
+The same system as a component graph:
+
 ```mermaid
 flowchart LR
     Human([Operator]) -- goal --> Planner
@@ -399,7 +403,7 @@ The cheapest way to raise the ceiling is a faster `verify_command` (for example,
 
 **Known limits of v1.**
 
-- The coordinator keeps state in memory. If it dies, start a new run for the remaining tasks; changes already landed are on the target branch, and the old log shows exactly which. The new run gets a new run id, so it neither inherits the old run's fences nor reconciles against its commits: remove tasks that already landed from the plan.
+- The coordinator keeps state in memory. If it dies, start a new run for the remaining tasks; changes already landed are on the target branch, and the old log shows exactly which. The new run gets a new run id, so it neither inherits the old run's fences nor reconciles against its commits: remove tasks that already landed from the plan, and remove them from the `deps` of the remaining tasks (those dependencies are already met on the target branch, and a `deps` entry naming a task outside the plan fails validation).
 - One repository and one target branch per run.
 - No batching of merges, so merge time bounds throughput (above).
 - Semantic conflicts between tasks with disjoint scopes are caught only by the verification command.

@@ -1,0 +1,192 @@
+<svg viewBox="0 0 1240 700" role="img" aria-label="One task's path through FLEET-A. 1: a worker gets a lease and fencing token from the coordinator. 2: it submits one squashed commit on its own branch. 3: a different agent reviews the diff and 4: approves. 5: the integrator claims the task's fence ref and lands the rebased, tested commit on main in one atomic update. A late report with an expired token is rejected." xmlns="http://www.w3.org/2000/svg">
+<style>
+svg {
+  --surface: #ffffff; --fg: #151a22; --muted: #586273; --line: #dbe0e7; --band: #eceff4;
+  --chip: #f3f5f9; --accent: #2550c8; --crit: #b3261e;
+  --font-display: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+  color: var(--fg);
+}
+@media (prefers-color-scheme: dark) {
+  svg { --surface: #151a21; --fg: #e5e9ef; --muted: #98a2b3; --line: #283040; --band: #12171e;
+        --chip: #1b212b; --accent: #85a6ff; --crit: #ff8a80; }
+}
+.fa-bg { fill: var(--surface); }
+.fa-box { fill: var(--surface); stroke: currentColor; stroke-width: 1.25; }
+.fa-strong { fill: var(--surface); stroke: currentColor; stroke-width: 2; }
+.fa-chip { fill: var(--chip); stroke: var(--line); stroke-width: 1; }
+.fa-band { fill: var(--band); stroke: var(--line); stroke-width: 1; }
+.fa-line { fill: none; stroke: currentColor; stroke-width: 1.5; }
+.fa-acc { fill: none; stroke: var(--accent); stroke-width: 2; }
+.fa-acc-fill { fill: var(--accent); }
+.fa-crit { fill: none; stroke: var(--crit); stroke-width: 1.5; }
+.fa-dash { stroke-dasharray: 5 4; }
+.fa-title { fill: currentColor; font-family: var(--font-display); font-size: 14px; font-weight: 600; }
+.fa-h1 { fill: currentColor; font-family: var(--font-display); font-size: 17px; font-weight: 700; }
+.fa-sub { fill: var(--muted); font-family: var(--font-body); font-size: 11px; }
+.fa-mono { fill: currentColor; font-family: var(--font-mono); font-size: 11.5px; }
+.fa-label { fill: currentColor; font-family: var(--font-body); font-size: 11px; }
+.fa-acc-t { fill: var(--accent); font-family: var(--font-body); font-size: 11px; font-weight: 500; }
+.fa-crit-t { fill: var(--crit); font-family: var(--font-body); font-size: 11px; font-weight: 500; }
+.fa-step { fill: var(--surface); stroke: currentColor; stroke-width: 1.5; }
+.fa-step-t { fill: currentColor; font-family: var(--font-mono); font-size: 11px; font-weight: 500; }
+.fa-small { font-size: 12.5px; }
+.fa-bold { font-weight: 600; }
+</style>
+<rect width="1240" height="700" class="fa-bg"/>
+  <defs>
+    <marker id="fa-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+    <marker id="fa-arrow-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="fa-acc-fill"/>
+    </marker>
+  </defs>
+
+  <!-- Operator and planner -->
+  <rect x="30" y="40" width="170" height="50" rx="8" class="fa-box"/>
+  <text x="115" y="62" text-anchor="middle" class="fa-title">Operator</text>
+  <text x="115" y="79" text-anchor="middle" class="fa-sub">you</text>
+
+  <line x1="80" y1="90" x2="80" y2="296" class="fa-line" marker-end="url(#fa-arrow)"/>
+  <text x="88" y="196" class="fa-label">goal</text>
+
+  <line x1="200" y1="65" x2="296" y2="65" class="fa-line" marker-end="url(#fa-arrow)"/>
+  <text x="206" y="44" class="fa-label">block, resume,</text>
+  <text x="206" y="57" class="fa-label">cancel</text>
+
+  <rect x="30" y="300" width="170" height="80" rx="8" class="fa-box"/>
+  <text x="115" y="330" text-anchor="middle" class="fa-title">Planner</text>
+  <text x="115" y="349" text-anchor="middle" class="fa-sub">Opus 5.5, read-only</text>
+  <text x="115" y="365" text-anchor="middle" class="fa-sub">runs before the fleet</text>
+
+  <path d="M150,300 V150 H296" class="fa-line" marker-end="url(#fa-arrow)"/>
+  <text x="158" y="226" class="fa-label">task graph +</text>
+  <text x="158" y="240" class="fa-label">write scopes</text>
+
+  <!-- Coordinator -->
+  <rect x="300" y="30" width="730" height="160" rx="10" class="fa-strong"/>
+  <text x="320" y="58" class="fa-h1">Coordinator</text>
+  <text x="320" y="78" class="fa-sub">one process, one lock: the only thing that changes task state</text>
+
+  <rect x="320" y="100" width="165" height="66" rx="6" class="fa-chip"/>
+  <text x="402.5" y="127" text-anchor="middle" class="fa-title fa-small">Task states</text>
+  <text x="402.5" y="146" text-anchor="middle" class="fa-sub">fixed transition table</text>
+
+  <rect x="497" y="100" width="165" height="66" rx="6" class="fa-chip"/>
+  <text x="579.5" y="127" text-anchor="middle" class="fa-title fa-small">Leases</text>
+  <text x="579.5" y="146" text-anchor="middle" class="fa-sub">tokens only increase</text>
+
+  <rect x="674" y="100" width="165" height="66" rx="6" class="fa-chip"/>
+  <text x="756.5" y="127" text-anchor="middle" class="fa-title fa-small">Scope locks</text>
+  <text x="756.5" y="146" text-anchor="middle" class="fa-sub">no overlapping writes</text>
+
+  <rect x="851" y="100" width="165" height="66" rx="6" class="fa-chip"/>
+  <text x="933.5" y="127" text-anchor="middle" class="fa-title fa-small">Budget ledger</text>
+  <text x="933.5" y="146" text-anchor="middle" class="fa-sub">reserve before spend</text>
+
+  <!-- Event log -->
+  <line x1="1030" y1="112" x2="1079" y2="112" class="fa-line" marker-end="url(#fa-arrow)"/>
+  <text x="1054" y="103" text-anchor="middle" class="fa-label">appends</text>
+  <path d="M1083,68 V152 A62,10 0 0 0 1207,152 V68" class="fa-box"/>
+  <ellipse cx="1145" cy="68" rx="62" ry="10" class="fa-box"/>
+  <text x="1145" y="108" text-anchor="middle" class="fa-title fa-small">Event log</text>
+  <text x="1145" y="125" text-anchor="middle" class="fa-sub">hash-chained,</text>
+  <text x="1145" y="140" text-anchor="middle" class="fa-sub">replays to state</text>
+
+  <!-- Agents -->
+  <rect x="330" y="300" width="190" height="80" rx="8" class="fa-box"/>
+  <text x="425" y="330" text-anchor="middle" class="fa-title">Workers × N</text>
+  <text x="425" y="349" text-anchor="middle" class="fa-sub">Sonnet 5.5</text>
+  <text x="425" y="365" text-anchor="middle" class="fa-sub">edit only their own worktree</text>
+
+  <rect x="590" y="300" width="190" height="80" rx="8" class="fa-box"/>
+  <text x="685" y="330" text-anchor="middle" class="fa-title">Reviewers × M</text>
+  <text x="685" y="349" text-anchor="middle" class="fa-sub">Opus 5.5, read-only</text>
+  <text x="685" y="365" text-anchor="middle" class="fa-sub">never the attempt's author</text>
+
+  <rect x="850" y="300" width="180" height="80" rx="8" class="fa-box"/>
+  <text x="940" y="330" text-anchor="middle" class="fa-title">Integrator × 1</text>
+  <text x="940" y="349" text-anchor="middle" class="fa-sub">plain code, no model</text>
+  <text x="940" y="365" text-anchor="middle" class="fa-sub">only writer of main</text>
+
+  <!-- Leases down, reports up -->
+  <line x1="403" y1="190" x2="403" y2="296" class="fa-line" marker-end="url(#fa-arrow)"/>
+  <text x="395" y="232" text-anchor="end" class="fa-label">lease</text>
+  <text x="395" y="245" text-anchor="end" class="fa-label">+ token</text>
+  <circle cx="403" cy="272" r="9" class="fa-step"/>
+  <text x="403" y="276" text-anchor="middle" class="fa-step-t">1</text>
+
+  <line x1="447" y1="300" x2="447" y2="194" class="fa-line" marker-end="url(#fa-arrow)"/>
+  <text x="455" y="232" class="fa-label">report</text>
+  <text x="455" y="245" class="fa-label">+ token</text>
+
+  <line x1="507" y1="300" x2="507" y2="212" class="fa-crit fa-dash"/>
+  <line x1="500" y1="199" x2="514" y2="213" class="fa-crit"/>
+  <line x1="514" y1="199" x2="500" y2="213" class="fa-crit"/>
+  <text x="519" y="226" class="fa-crit-t">late report,</text>
+  <text x="519" y="239" class="fa-crit-t">expired token:</text>
+  <text x="519" y="252" class="fa-crit-t">rejected</text>
+
+  <line x1="663" y1="190" x2="663" y2="296" class="fa-line" marker-end="url(#fa-arrow)"/>
+  <text x="655" y="245" text-anchor="end" class="fa-label">lease</text>
+
+  <line x1="707" y1="300" x2="707" y2="194" class="fa-line" marker-end="url(#fa-arrow)"/>
+  <text x="715" y="232" class="fa-label">approve</text>
+  <text x="715" y="245" class="fa-label">or reject</text>
+  <circle cx="707" cy="272" r="9" class="fa-step"/>
+  <text x="707" y="276" text-anchor="middle" class="fa-step-t">4</text>
+
+  <line x1="918" y1="190" x2="918" y2="296" class="fa-line" marker-end="url(#fa-arrow)"/>
+  <text x="910" y="245" text-anchor="end" class="fa-label">lease</text>
+
+  <line x1="962" y1="300" x2="962" y2="194" class="fa-line" marker-end="url(#fa-arrow)"/>
+  <text x="970" y="245" class="fa-label">outcome</text>
+
+  <!-- Git repository -->
+  <rect x="300" y="470" width="910" height="210" rx="10" class="fa-band"/>
+  <text x="320" y="494" class="fa-title fa-small">git repository</text>
+
+  <rect x="330" y="530" width="190" height="62" rx="6" class="fa-box"/>
+  <text x="425" y="556" text-anchor="middle" class="fa-mono">fleet/T7/a2-t41</text>
+  <text x="425" y="576" text-anchor="middle" class="fa-sub">one branch per lease</text>
+
+  <rect x="720" y="530" width="190" height="62" rx="6" class="fa-box"/>
+  <text x="815" y="551" text-anchor="middle" class="fa-mono">refs/fleet/fence/</text>
+  <text x="815" y="566" text-anchor="middle" class="fa-mono">&lt;run&gt;/T7</text>
+  <text x="815" y="583" text-anchor="middle" class="fa-sub">highest token holds it</text>
+
+  <rect x="990" y="530" width="190" height="62" rx="6" class="fa-strong"/>
+  <text x="1085" y="556" text-anchor="middle" class="fa-mono fa-bold">main</text>
+  <text x="1085" y="576" text-anchor="middle" class="fa-sub">target branch</text>
+
+  <!-- 2: worker commits -->
+  <line x1="425" y1="380" x2="425" y2="526" class="fa-line" marker-end="url(#fa-arrow)"/>
+  <circle cx="425" cy="418" r="9" class="fa-step"/>
+  <text x="425" y="422" text-anchor="middle" class="fa-step-t">2</text>
+  <text x="437" y="458" class="fa-label">one squashed commit</text>
+
+  <!-- 3: reviewer reads -->
+  <line x1="630" y1="380" x2="524" y2="545" class="fa-line" marker-end="url(#fa-arrow)"/>
+  <circle cx="598" cy="430" r="9" class="fa-step"/>
+  <text x="598" y="434" text-anchor="middle" class="fa-step-t">3</text>
+  <text x="590" y="462" class="fa-label">reads the diff</text>
+
+  <!-- 5: fenced landing -->
+  <line x1="915" y1="380" x2="852" y2="526" class="fa-acc" marker-end="url(#fa-arrow-acc)"/>
+  <text x="876" y="452" text-anchor="end" class="fa-acc-t">claim fence</text>
+
+  <line x1="965" y1="380" x2="1040" y2="526" class="fa-acc" marker-end="url(#fa-arrow-acc)"/>
+  <circle cx="990" cy="429" r="9" class="fa-step"/>
+  <text x="990" y="433" text-anchor="middle" class="fa-step-t">5</text>
+  <text x="1013" y="452" class="fa-acc-t">land: one atomic</text>
+  <text x="1013" y="466" class="fa-acc-t">update-ref</text>
+
+  <line x1="910" y1="561" x2="990" y2="561" class="fa-acc fa-dash"/>
+  <text x="950" y="551" text-anchor="middle" class="fa-acc-t">checked</text>
+  <text x="950" y="580" text-anchor="middle" class="fa-acc-t">together</text>
+
+  <path d="M425,592 V640 H1085 V596" class="fa-acc" marker-end="url(#fa-arrow-acc)"/>
+  <text x="755" y="632" text-anchor="middle" class="fa-acc-t">rebased onto main, scope re-checked, tests run</text>
+</svg>

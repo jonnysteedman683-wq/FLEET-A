@@ -6,6 +6,8 @@ A planner turns a goal into a dependency graph of tasks. Workers implement tasks
 
 The design is specified in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**. Its safety invariants are checked by a fault-injecting simulator, and mutation tests confirm that each safety mechanism is necessary.
 
+![How one task moves through FLEET-A: lease and token, one squashed commit, independent review, then a fenced atomic landing on main. Late reports with expired tokens are rejected.](docs/fleet-a-task-flow.svg)
+
 ## Requirements
 
 - Python 3.11+ (standard library only)
