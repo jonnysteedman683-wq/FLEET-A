@@ -6,6 +6,7 @@ everything task-specific goes in the user prompt.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping, Sequence
 
 from .model import Assignment, TaskSpec
@@ -173,15 +174,28 @@ def triage_prompt(task: TaskSpec, feedback: str) -> str:
     return f"TASK {task.id}: {task.title}\n\nFEEDBACK TO CONDENSE:\n{feedback}"
 
 
+_TRAILER_LIKE = re.compile(r"^\s*fleet-[a-z-]*\s*:", re.IGNORECASE)
+
+
+def sanitize_summary(summary: str, limit: int = 4000) -> str:
+    """Model-written text for the commit body, minus anything shaped like a FLEET-A trailer.
+
+    Reconciliation reads only git's parsed trailer block, which this text can never be part of;
+    dropping look-alike lines as well keeps the history unambiguous for humans and tools.
+    """
+    kept = [line for line in summary.strip().splitlines() if not _TRAILER_LIKE.match(line)]
+    body = "\n".join(kept).strip()
+    return body if len(body) <= limit else body[:limit] + "..."
+
+
 def commit_message(assignment: Assignment, summary: str) -> str:
     task = assignment.task
-    body = summary.strip()
-    if len(body) > 4000:
-        body = body[:4000] + "..."
+    body = sanitize_summary(summary)
     lines = [f"fleet({task.id}): {task.title}", ""]
     if body:
         lines += [body, ""]
     lines += [
+        f"Fleet-Run: {assignment.run_id}",
         f"Fleet-Task: {task.id}",
         f"Fleet-Attempt: {assignment.attempt}",
         f"Fleet-Agent: {assignment.agent_id}",

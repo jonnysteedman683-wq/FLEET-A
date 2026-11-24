@@ -170,6 +170,9 @@ def test_plan_round_trip_and_strict_keys():
         Plan.from_dict({**raw, "tasks": [{**raw["tasks"][0], "id": "bad id"}]})
     with pytest.raises(PlanError, match="budget_usd must be >="):
         Plan.from_dict({**raw, "tasks": [{**raw["tasks"][0], "budget_usd": "1"}]})
+    for unsafe in ("a..b", "x.lock", "x."):
+        with pytest.raises(PlanError, match="must match"):
+            Plan.from_dict({**raw, "tasks": [{**raw["tasks"][0], "id": unsafe}]})
 
 
 def test_money_is_exact():

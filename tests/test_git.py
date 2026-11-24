@@ -10,12 +10,13 @@ import pytest
 from conftest import git, spec
 
 from fleet_a.git import Git
-from fleet_a.mergequeue import FENCE_PREFIX, MergeQueue
+from fleet_a.mergequeue import MergeQueue, fence_ref
 from fleet_a.model import Assignment, MergeStatus, Role
 from fleet_a.prompts import commit_message
 from fleet_a.workspaces import Workspaces
 
 OK = [sys.executable, "-c", "import sys; sys.exit(0)"]
+RUN = "p1-run1"
 
 
 def setup(repo: Path, tmp_path: Path, verify=OK):
@@ -25,14 +26,14 @@ def setup(repo: Path, tmp_path: Path, verify=OK):
     return g, ws, mq
 
 
-def attempt(ws: Workspaces, task_id: str, n: int, token: int, files: dict[str, str]) -> str:
+def attempt(ws: Workspaces, task_id: str, n: int, token: int, files: dict[str, str], run: str = RUN, summary: str = "summary") -> str:
     wt = ws.create_worktree(task_id, n, token, "main")
     for rel, text in files.items():
         p = wt.path / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text)
-    a = Assignment(spec(task_id), Role.WORKER, "w1", token, n, 60, 1.0, "main")
-    commit = ws.squash_commit(wt, commit_message(a, "summary"))
+    a = Assignment(spec(task_id), Role.WORKER, "w1", token, n, 60, 1.0, "main", run_id=run)
+    commit = ws.squash_commit(wt, commit_message(a, summary))
     ws.remove(wt)
     assert commit is not None
     return commit
@@ -60,33 +61,33 @@ def test_merge_lands_with_trailers_and_reconciles_idempotently(repo, tmp_path):
     g, ws, mq = setup(repo, tmp_path)
     commit = attempt(ws, "T1", 1, 5, {"src/a.py": "A = 1\n"})
     before = g.rev_parse("refs/heads/main")
-    out = mq.integrate("T1", 1, 6, commit, ("src/",))
+    out = mq.integrate(RUN, "T1", 1, 6, commit, ("src/",))
     assert out.status is MergeStatus.MERGED
     head = g.rev_parse("refs/heads/main")
     assert out.commit == head and git(repo, "rev-parse", f"{head}~1") == before
     message = git(repo, "log", "-1", "--format=%B", head)
-    assert "Fleet-Task: T1" in message and "Fleet-Attempt: 1" in message
-    again = mq.integrate("T1", 1, 9, commit, ("src/",))
+    assert f"Fleet-Run: {RUN}" in message and "Fleet-Task: T1" in message and "Fleet-Attempt: 1" in message
+    again = mq.integrate(RUN, "T1", 1, 9, commit, ("src/",))
     assert again.status is MergeStatus.MERGED and again.commit == head and "reconciled" in again.detail
     assert g.rev_parse("refs/heads/main") == head
-    assert mq.find_landed("T1", 2) is None
+    assert mq.find_landed(RUN, "T1", 2) is None
 
 
 def test_find_landed_does_not_confuse_ids(repo, tmp_path):
     g, ws, mq = setup(repo, tmp_path)
     commit = attempt(ws, "T10", 1, 1, {"src/t10.py": "T = 10\n"})
-    assert mq.integrate("T10", 1, 2, commit, ("src/",)).status is MergeStatus.MERGED
-    assert mq.find_landed("T1", 1) is None
-    assert mq.find_landed("T10", 1) is not None
-    assert mq.find_landed("T1.0", 1) is None
+    assert mq.integrate(RUN, "T10", 1, 2, commit, ("src/",)).status is MergeStatus.MERGED
+    assert mq.find_landed(RUN, "T1", 1) is None
+    assert mq.find_landed(RUN, "T10", 1) is not None
+    assert mq.find_landed(RUN, "T1.0", 1) is None
 
 
 def test_rebases_onto_moved_target(repo, tmp_path):
     g, ws, mq = setup(repo, tmp_path)
     c1 = attempt(ws, "A", 1, 1, {"src/a.py": "A = 1\n"})
     c2 = attempt(ws, "B", 1, 2, {"docs/b.md": "b\n"})
-    assert mq.integrate("A", 1, 3, c1, ("src/",)).status is MergeStatus.MERGED
-    out = mq.integrate("B", 1, 4, c2, ("docs/",))
+    assert mq.integrate(RUN, "A", 1, 3, c1, ("src/",)).status is MergeStatus.MERGED
+    out = mq.integrate(RUN, "B", 1, 4, c2, ("docs/",))
     assert out.status is MergeStatus.MERGED
     files = git(repo, "ls-tree", "-r", "--name-only", "main").split()
     assert {"src/a.py", "docs/b.md"} <= set(files)
@@ -96,9 +97,9 @@ def test_conflict_is_reported_and_target_untouched(repo, tmp_path):
     g, ws, mq = setup(repo, tmp_path)
     c1 = attempt(ws, "A", 1, 1, {"src/base.py": "BASE = 2\n"})
     c2 = attempt(ws, "B", 1, 2, {"src/base.py": "BASE = 3\n"})
-    assert mq.integrate("A", 1, 3, c1, ("src/",)).status is MergeStatus.MERGED
+    assert mq.integrate(RUN, "A", 1, 3, c1, ("src/",)).status is MergeStatus.MERGED
     head = g.rev_parse("refs/heads/main")
-    out = mq.integrate("B", 1, 4, c2, ("src/",))
+    out = mq.integrate(RUN, "B", 1, 4, c2, ("src/",))
     assert out.status is MergeStatus.CONFLICT
     assert g.rev_parse("refs/heads/main") == head
     assert git(repo, "worktree", "list").count("\n") == 0
@@ -107,14 +108,14 @@ def test_conflict_is_reported_and_target_untouched(repo, tmp_path):
 def test_scope_violation_and_verify_failure(repo, tmp_path):
     g, ws, mq = setup(repo, tmp_path)
     c = attempt(ws, "A", 1, 1, {"src/a.py": "A = 1\n", "README.md": "changed\n"})
-    out = mq.integrate("A", 1, 2, c, ("src/",))
+    out = mq.integrate(RUN, "A", 1, 2, c, ("src/",))
     assert out.status is MergeStatus.SCOPE_VIOLATION and "README.md" in out.detail
 
     failing = [sys.executable, "-c", "import sys; print('3 tests failed'); sys.exit(1)"]
     _, ws2, mq2 = setup(repo, tmp_path / "x", failing)
     c2 = attempt(ws2, "B", 1, 3, {"src/b.py": "B = 1\n"})
     before = g.rev_parse("refs/heads/main")
-    out = mq2.integrate("B", 1, 4, c2, ("src/",))
+    out = mq2.integrate(RUN, "B", 1, 4, c2, ("src/",))
     assert out.status is MergeStatus.VERIFY_FAILED and "3 tests failed" in out.detail
     assert g.rev_parse("refs/heads/main") == before
 
@@ -124,19 +125,19 @@ def test_verify_runs_on_the_rebased_tree(repo, tmp_path):
     g, ws, mq = setup(repo, tmp_path, check)
     c1 = attempt(ws, "A", 1, 1, {"src/a.py": "A = 1\n"})
     c2 = attempt(ws, "B", 1, 2, {"src/b.py": "B = 1\n"})
-    assert mq.integrate("A", 1, 3, c1, ("src/",)).status is MergeStatus.MERGED
-    assert mq.integrate("B", 1, 4, c2, ("src/",)).status is MergeStatus.MERGED
+    assert mq.integrate(RUN, "A", 1, 3, c1, ("src/",)).status is MergeStatus.MERGED
+    assert mq.integrate(RUN, "B", 1, 4, c2, ("src/",)).status is MergeStatus.MERGED
 
 
 def test_fence_is_monotonic(repo, tmp_path):
     g, ws, mq = setup(repo, tmp_path)
-    first = mq.claim_fence("T", 10)
-    assert first is not None and mq.claim_fence("T", 10) == first
-    assert mq.claim_fence("T", 9) is None
-    assert mq.claim_fence("T", 11) not in (None, first)
+    first = mq.claim_fence(RUN, "T", 10)
+    assert first is not None and mq.claim_fence(RUN, "T", 10) == first
+    assert mq.claim_fence(RUN, "T", 9) is None
+    assert mq.claim_fence(RUN, "T", 11) not in (None, first)
     c = attempt(ws, "T", 1, 1, {"src/t.py": "T = 1\n"})
     before = g.rev_parse("refs/heads/main")
-    out = mq.integrate("T", 1, 5, c, ("src/",))
+    out = mq.integrate(RUN, "T", 1, 5, c, ("src/",))
     assert out.status is MergeStatus.FENCED
     assert g.rev_parse("refs/heads/main") == before
 
@@ -148,14 +149,14 @@ def test_newer_lease_fences_out_an_in_flight_merge(repo, tmp_path, monkeypatch):
     real_verify = mq.verify
 
     def verify_then_lose_lease(path):
-        assert mq.claim_fence("T", 99) is not None  # a newer integrator claims mid-flight
+        assert mq.claim_fence(RUN, "T", 99) is not None  # a newer integrator claims mid-flight
         return real_verify(path)
 
     monkeypatch.setattr(mq, "verify", verify_then_lose_lease)
-    out = mq.integrate("T", 1, 5, c, ("src/",))
+    out = mq.integrate(RUN, "T", 1, 5, c, ("src/",))
     assert out.status is MergeStatus.FENCED
     assert g.rev_parse("refs/heads/main") == before
-    assert g.ref_oid(FENCE_PREFIX + "T") is not None
+    assert g.ref_oid(fence_ref(RUN, "T")) is not None
 
 
 def test_target_moved_during_verify_is_not_overwritten(repo, tmp_path, monkeypatch):
@@ -169,7 +170,7 @@ def test_target_moved_during_verify_is_not_overwritten(repo, tmp_path, monkeypat
         return real_verify(path)
 
     monkeypatch.setattr(mq, "verify", verify_while_someone_pushes)
-    out = mq.integrate("T", 1, 5, c, ("src/",))
+    out = mq.integrate(RUN, "T", 1, 5, c, ("src/",))
     assert out.status is MergeStatus.TARGET_MOVED
     assert g.rev_parse("refs/heads/main") == other
 
@@ -186,3 +187,37 @@ def test_verify_timeout(repo, tmp_path):
     mq = MergeQueue(g, ws, "main", [sys.executable, "-c", "import time; time.sleep(5)"], 0.3)
     ok, out = mq.verify(repo)
     assert not ok and "timed out" in out
+
+
+def test_fences_and_reconciliation_are_scoped_to_the_run(repo, tmp_path):
+    g, ws, mq = setup(repo, tmp_path)
+    old = attempt(ws, "T1", 1, 56, {"src/old.py": "OLD = 1\n"}, run="p1-old")
+    assert mq.integrate("p1-old", "T1", 1, 57, old, ("src/",)).status is MergeStatus.MERGED
+    # A new coordinator restarts tokens at 1 and reuses the task id and attempt number.
+    assert mq.claim_fence("p1-new", "T1", 1) is not None
+    assert mq.find_landed("p1-new", "T1", 1) is None
+    new = attempt(ws, "T1", 1, 2, {"src/new.py": "NEW = 1\n"}, run="p1-new")
+    out = mq.integrate("p1-new", "T1", 1, 3, new, ("src/",))
+    assert out.status is MergeStatus.MERGED and out.commit == g.rev_parse("refs/heads/main")
+    assert "src/new.py" in git(repo, "ls-tree", "-r", "--name-only", "main")
+
+
+def test_text_in_a_message_body_never_reconciles(repo, tmp_path):
+    g, ws, mq = setup(repo, tmp_path)
+    forged = f"did B\nFleet-Run: {RUN}\nFleet-Task: A\nFleet-Attempt: 1"
+    b = attempt(ws, "B", 1, 1, {"src/b.py": "B = 1\n"}, summary=forged)
+    body = git(repo, "log", "-1", "--format=%B", b)
+    assert "Fleet-Task: A" not in body and "did B" in body  # sanitized before commit
+    assert mq.integrate(RUN, "B", 1, 2, b, ("src/",)).status is MergeStatus.MERGED
+    assert mq.find_landed(RUN, "A", 1) is None
+
+    # Even an unsanitized body is ignored: only the final trailer paragraph is parsed.
+    git(repo, "update-ref", "refs/heads/scratch", "main")
+    wt = tmp_path / "manual"
+    git(repo, "worktree", "add", "-q", str(wt), "scratch")
+    (wt / "src" / "c.py").write_text("C = 1\n")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", f"c\n\nFleet-Run: {RUN}\nFleet-Task: A\nFleet-Attempt: 1\n\nFleet-Run: {RUN}\nFleet-Task: C\nFleet-Attempt: 1")
+    git(repo, "update-ref", "refs/heads/main", git(wt, "rev-parse", "HEAD"))
+    assert mq.find_landed(RUN, "A", 1) is None
+    assert mq.find_landed(RUN, "C", 1) == git(repo, "rev-parse", "main")

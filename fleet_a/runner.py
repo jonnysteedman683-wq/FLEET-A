@@ -246,7 +246,9 @@ class AgentRunner:
         if not a.commit:
             raise FleetError(f"merge assignment for {a.task.id} has no commit")
         try:
-            outcome = self.merge_queue.integrate(a.task.id, a.attempt, a.token, a.commit, a.task.write_scope)
+            outcome = self.merge_queue.integrate(
+                a.run_id, a.task.id, a.attempt, a.token, a.commit, a.task.write_scope
+            )
         except Exception as exc:
             log.exception("%s: integrator error on %s", self.agent.id, a.task.id)
             self.coord.fail(a.task.id, a.token, f"integrator runtime error: {exc!r}")

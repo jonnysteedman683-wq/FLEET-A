@@ -76,7 +76,7 @@ A **plan** is `{id, goal, tasks[]}`. A **task** (`TaskSpec`, `model.py`):
 
 | Field | Type | Rule |
 |---|---|---|
-| `id` | string | `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, unique (safe in branch names and refs) |
+| `id` | string | `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, no `..`, not ending in `.` or `.lock`, unique (safe in branch and ref names) |
 | `title`, `description` | string | non-empty |
 | `acceptance` | string[] | concrete, testable criteria shown to worker and reviewer |
 | `deps` | id[] | must exist; no self-edges, duplicates or cycles (cycle reported as a path) |
@@ -228,14 +228,16 @@ The aging term adds one priority point per `aging_interval_s` (600 s) of waiting
   ```
   fleet(<task>): <title>
 
-  <worker summary>
+  <worker summary, with any line shaped like a Fleet-* trailer removed>
 
+  Fleet-Run: <run id>
   Fleet-Task: <task>
   Fleet-Attempt: <n>
   Fleet-Agent: <agent>
   Fleet-Token: <token>
   ```
 
+- The **run id** is `<plan id>-<8 random hex digits>`, fixed when the coordinator starts. Fencing tokens restart at 1 in every coordinator, so everything a run leaves in git (fence refs, trailers) carries the run id and no two runs can collide.
 - The changed-file list is computed with `git diff --name-only --no-renames base head` (a rename lists both paths, so moving a file out of scope is caught).
 - Reviewers get a detached worktree at the attempt's commit and are told the base and head commits.
 - Worktrees are removed when the phase ends; attempt branches are kept as the audit trail.
@@ -245,10 +247,10 @@ The aging term adds one priority point per `aging_interval_s` (600 s) of waiting
 ```mermaid
 sequenceDiagram
     participant I as Integrator (token t)
-    participant F as refs/fleet/fence/<task>
+    participant F as refs/fleet/fence/<run>/<task>
     participant T as refs/heads/<target>
     I->>F: claim: CAS to blob("t") unless held by a token > t
-    I->>T: reconcile: commit with Fleet-Task/Fleet-Attempt trailers already on target?
+    I->>T: reconcile: commit whose trailer block is this run, task and attempt already on target?
     alt already landed
         I-->>I: outcome merged (no writes)
     else not landed
@@ -272,6 +274,8 @@ sequenceDiagram
 **Why the fence.** Lease expiry alone cannot stop a slow integrator that already passed its last check: it could land an attempt after the coordinator moved the task on, for example after a newer integrator reported a conflict and the task went back to rework. The fence ref puts the fencing token where the write happens. The claim only moves the fence to a *higher* token, and the landing transaction verifies the fence still holds *its* claim, so after a newer lease claims it no older integrator can land anything for that task. `test_newer_lease_fences_out_an_in_flight_merge` exercises this against real git; `test_detects_missing_merge_fence` shows the simulator catching a fence-less integrator landing a task that then failed.
 
 **Why reconciliation.** If an integrator lands and then loses its lease before reporting, the next integrator finds the trailer commit on the target and reports `merged` without touching anything. Landing is therefore idempotent, and the coordinator's view converges on what git says.
+
+Reconciliation reads only git's parsed trailer block (the message's final paragraph, via `%(trailers:key=…,valueonly)`) and requires exactly one `Fleet-Run`, `Fleet-Task` and `Fleet-Attempt` value, each equal to what it is looking for. Model-written text in the message body can therefore never make a task look landed, and the worker's summary is also stripped of trailer-shaped lines before it is committed. Fence refs are kept after the run as an audit record; remove them with `git for-each-ref --format='delete %(refname)' refs/fleet/fence/<run>/ | git update-ref --stdin` once nothing from that run is running.
 
 The verification command (default `python3 -m pytest -q`, timeout 1200 s) runs on the *rebased* tree: what is verified is exactly what lands.
 
@@ -364,7 +368,7 @@ The event log is JSONL, one event per line: `{seq, ts, kind, task, data, prev, h
 
 | kind | When | Key data |
 |---|---|---|
-| `plan` | run start | task ids in topological order, budgets, target branch |
+| `plan` | run start | plan id, run id, task ids in topological order, budgets, target branch |
 | `transition` | every state change | from, to, reason, attempt; on lease: agent, token, expires_at, reserved_usd |
 | `spend` | every settlement | reserved_usd, charged_usd, overrun_usd, estimated |
 | `lease_expired` | expiry | token, agent, role |
@@ -395,7 +399,7 @@ The cheapest way to raise the ceiling is a faster `verify_command` (for example,
 
 **Known limits of v1.**
 
-- The coordinator keeps state in memory. If it dies, start a new run with a new plan id for the remaining tasks; changes already landed are on the target branch, and the old log shows exactly which.
+- The coordinator keeps state in memory. If it dies, start a new run for the remaining tasks; changes already landed are on the target branch, and the old log shows exactly which. The new run gets a new run id, so it neither inherits the old run's fences nor reconciles against its commits: remove tasks that already landed from the plan.
 - One repository and one target branch per run.
 - No batching of merges, so merge time bounds throughput (above).
 - Semantic conflicts between tasks with disjoint scopes are caught only by the verification command.

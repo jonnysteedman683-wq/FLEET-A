@@ -192,7 +192,7 @@ class Simulator:
                 AgentPool(Role.INTEGRATOR, cfg.integrators),
             ),
         )
-        self.coord = Coordinator(self.plan, self.config, self.clock, EventLog())
+        self.coord = Coordinator(self.plan, self.config, self.clock, EventLog(), run_id=f"sim-{cfg.seed}")
         self.target = SimTarget()
         self.agents: list[SimAgent] = []
         for pool in self.config.agents:

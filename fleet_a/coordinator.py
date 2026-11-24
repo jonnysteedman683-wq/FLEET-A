@@ -8,6 +8,7 @@ StaleLease without side effects.
 
 from __future__ import annotations
 
+import secrets
 import threading
 import time
 from dataclasses import dataclass, field
@@ -39,6 +40,7 @@ from .model import (
     TaskState,
     WorkResult,
     format_usd,
+    is_ref_safe_id,
     micros_to_usd,
     usd_to_micros,
 )
@@ -116,10 +118,17 @@ class Coordinator:
         config: FleetConfig,
         clock: Clock | None = None,
         events: EventLog | None = None,
+        *,
+        run_id: str | None = None,
     ) -> None:
         self._lock = threading.RLock()
         self.plan = plan
         self.config = config
+        # Fencing tokens restart at 1 in every coordinator, so everything a run leaves in git
+        # (fence refs, commit trailers) is namespaced by a run id no other run shares.
+        self.run_id = run_id if run_id is not None else f"{plan.id}-{secrets.token_hex(4)}"
+        if not is_ref_safe_id(self.run_id, max_len=128):
+            raise FleetError(f"run id is not safe in git ref names: {self.run_id!r}")
         self.clock: Clock = clock if clock is not None else SystemClock()
         self.events = events if events is not None else EventLog()
         self.graph = TaskGraph(plan.tasks)
@@ -147,6 +156,7 @@ class Coordinator:
             None,
             {
                 "plan": plan.id,
+                "run": self.run_id,
                 "goal": plan.goal,
                 "tasks": list(self.graph.topo_order),
                 "fleet_budget_usd": micros_to_usd(config.fleet_budget),
@@ -452,6 +462,7 @@ class Coordinator:
             run = self.ledger.account(self.run_account)
             return {
                 "plan": self.plan.id,
+                "run": self.run_id,
                 "finished": self.is_finished(),
                 "states": counts,
                 "spent_usd": micros_to_usd(run.spent),
@@ -538,6 +549,7 @@ class Coordinator:
             ttl_s=self.config.ttl(role),
             budget_usd=micros_to_usd(amount),
             target_branch=self.config.target_branch,
+            run_id=self.run_id,
             feedback=tuple(rec.feedback),
             branch=rec.branch if role is not Role.WORKER else None,
             commit=rec.commit if role is not Role.WORKER else None,

@@ -125,10 +125,27 @@ def _str_list(value: object, field_name: str, owner: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+_REF_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def is_ref_safe_id(value: object, max_len: int = 64) -> bool:
+    """Ids become parts of git branch and ref names, so they must also satisfy git's ref rules."""
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= max_len
+        and _REF_COMPONENT.match(value) is not None
+        and ".." not in value
+        and not value.endswith((".", ".lock"))
+    )
+
+
 def _check_id(value: object, what: str) -> str:
-    if not isinstance(value, str) or not ID_PATTERN.match(value):
-        raise PlanError(f"{what} must match {ID_PATTERN.pattern}: {value!r}")
-    return value
+    if not is_ref_safe_id(value):
+        raise PlanError(
+            f"{what} must match {ID_PATTERN.pattern}, contain no '..', "
+            f"and not end in '.' or '.lock': {value!r}"
+        )
+    return value  # type: ignore[return-value]
 
 
 @dataclass(frozen=True)
@@ -296,6 +313,7 @@ class Assignment:
     ttl_s: float
     budget_usd: float  # reserved for this phase; the executor must not spend more
     target_branch: str
+    run_id: str = ""  # unique per coordinator; namespaces merge fences and commit trailers
     feedback: tuple[str, ...] = ()
     branch: str | None = None
     commit: str | None = None
