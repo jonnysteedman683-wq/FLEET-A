@@ -129,7 +129,7 @@ def test_landed_command_finds_a_merge_the_log_never_recorded(repo, tmp_path, cap
 
     g = Git(repo)
     ws = Workspaces(g, tmp_path / "wt")
-    wt = ws.create_worktree("T1", 1, 7, "main")
+    wt = ws.create_worktree("demo-0badc0de", "T1", 1, 7, "main")
     (wt.path / "src" / "t1.py").write_text("T1 = 1\n")
     a = Assignment(spec("T1"), Role.WORKER, "worker-1", 7, 1, 60, 1.0, "main", run_id="demo-0badc0de")
     commit = ws.squash_commit(wt, commit_message(a, "added t1"))

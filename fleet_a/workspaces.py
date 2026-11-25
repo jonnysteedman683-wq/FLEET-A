@@ -1,8 +1,10 @@
 """Isolated git worktrees, one per lease.
 
-Each worker attempt gets a fresh worktree on a branch named after its task, attempt and fencing
-token (``fleet/<task>/a<attempt>-t<token>``), so two leases can never share a branch or a
-directory. Reviewers and the integrator check out detached worktrees of a specific commit.
+Each worker attempt gets a fresh worktree on a branch named after its run, task, attempt and
+fencing token (``fleet/<run>/<task>/a<attempt>-t<token>``), under ``<root>/<run>/``. Two leases can
+never share a branch or a directory, even across runs of the same plan in one repository: tokens
+restart at 1 in every run, so without the run id a new run collides with branches an earlier run
+left behind. Reviewers and the integrator check out detached worktrees of a specific commit.
 """
 
 from __future__ import annotations
@@ -28,17 +30,22 @@ class Workspaces:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def create_worktree(self, task_id: str, attempt: int, token: int, target_branch: str) -> Worktree:
+    def create_worktree(
+        self, run_id: str, task_id: str, attempt: int, token: int, target_branch: str
+    ) -> Worktree:
         base = self.git.rev_parse(f"refs/heads/{target_branch}")
-        branch = f"fleet/{task_id}/a{attempt}-t{token}"
-        path = self.root / f"{task_id}-a{attempt}-t{token}"
+        branch = f"fleet/{run_id}/{task_id}/a{attempt}-t{token}"
+        path = self.root / run_id / f"{task_id}-a{attempt}-t{token}"
         self._clear(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         self.git.run("worktree", "add", "-q", "-b", branch, str(path), base)
         return Worktree(path=path, branch=branch, base=base)
 
     def checkout_detached(self, commit: str, name: str, base: str | None = None) -> Worktree:
+        """Check out ``commit`` at ``<root>/<name>``; callers put their run id in ``name``."""
         path = self.root / name
         self._clear(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         self.git.run("worktree", "add", "-q", "--detach", str(path), commit)
         return Worktree(path=path, branch=None, base=base or commit)
 

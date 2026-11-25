@@ -226,7 +226,7 @@ The aging term adds one priority point per `aging_interval_s` (600 s) of waiting
 
 ## 8. Workspaces and attempts
 
-- Each worker lease gets a new worktree at `<worktrees>/<task>-a<attempt>-t<token>` on branch `fleet/<task>/a<attempt>-t<token>`, created from the current tip of the target branch.
+- Each worker lease gets a new worktree at `<worktrees>/<run>/<task>-a<attempt>-t<token>` on branch `fleet/<run>/<task>/a<attempt>-t<token>`, created from the current tip of the target branch. The run id is part of both because fencing tokens restart at 1 in every run: without it, a second run of the same plan collides with branches an earlier run left behind. Reviewer and integrator checkouts live under `<worktrees>/<run>/` too.
 - The worker session edits files only. When it returns `status: "done"`, the runner squashes everything (including any commits the agent made) into **one commit on top of the base**, with trailers:
 
   ```
