@@ -89,7 +89,7 @@ A **plan** is `{id, goal, tasks[]}`. A **task** (`TaskSpec`, `model.py`):
 | `priority` | int | higher first (section 7) |
 | `max_attempts` | int 1..20 | default 3 |
 | `attempt_budget_usd` | decimal string | reserved per worker attempt, default "2.00" |
-| `budget_usd` | decimal string | task cap; default `max_attempts × (attempt_budget + review_budget)` |
+| `budget_usd` | decimal string | task cap; default `max_attempts × (attempt_budget + review_budget) + max_review_budget_retries × review_budget` |
 
 Unknown keys are rejected everywhere (plan, task, config) so a typo can never silently become a default.
 
@@ -145,7 +145,7 @@ Not drawn: every non-terminal state except `merging` can go to `blocked` and to 
 | pending → ready | every dependency is `done` (checked at start, when a dependency lands, and on resume) |
 | ready → running | worker `acquire`: agent has the task's capabilities, the scope is free, the attempt budget is reserved, `attempts < max_attempts`; `attempts += 1`, scope locked |
 | ready → blocked | the task account cannot fund another attempt (resume to `ready`); or operator |
-| running → awaiting_review | `submit_work` with the live token, non-empty change, every changed path inside the scope; with `verify_before_review`, `verify_command` passed in the worktree first |
+| running → awaiting_review | `submit_work` with the live token, non-empty change, every changed path inside the scope; with `verify_before_review`, `verify_command` passed in the worktree first, or failed on a base the target has since moved past (the merge queue verifies the rebased tree) |
 | running → ready / failed | **rework**: retryable failure, lease expiry, scope violation, empty attempt, `verify_failed before review`; `failed` once `attempts == max_attempts` |
 | running → failed | non-retryable worker failure |
 | running → blocked | worker reports `status: "blocked"` (escalation), or operator |
@@ -166,11 +166,11 @@ Not drawn: every non-terminal state except `merging` can go to `blocked` and to 
 
 ### 5.2 Rework, attempts and infrastructure retries
 
-**Attempts** measure work quality. One is consumed per worker lease. Anything wrong with the *work* (failed tests, including `verify_command` run in the worker's worktree before review when `verify_before_review` is on, rejected review, merge conflict, verify failure, scope violation, empty change, worker crash) sends the task back to `ready` with the reason appended to its feedback, until `max_attempts` is reached and it fails.
+**Attempts** measure work quality. One is consumed per worker lease. Anything wrong with the *work* (failed tests, including `verify_command` run in the worker's worktree before review when `verify_before_review` is on and the target has not moved since the attempt began, rejected review, merge conflict, verify failure, scope violation, empty change, worker crash) sends the task back to `ready` with the reason appended to its feedback, until `max_attempts` is reached and it fails.
 
 **Infrastructure retries** measure everything else (reviewer crash, integrator crash, target moved). They do not consume attempts. `infra_failures` resets when an attempt is submitted and when it is approved. Past `max_infra_retries` the task blocks for a human instead of looping.
 
-**Review budget caps** are counted apart from both. A review that stops at `review_budget_usd` (the session's `error_max_budget_usd` result) increments `review_budget_hits` instead of `infra_failures`: a retry at the same cap can spend the whole cap again, so after `max_review_budget_retries` retries (default 1) the task blocks with a reason that asks the operator to raise `review_budget_usd`. The count lasts for the task's life and `resume` resets it.
+**Review budget caps** are counted apart from both. A review that stops at `review_budget_usd` (the session's `error_max_budget_usd` result) increments `review_budget_hits` instead of `infra_failures`: a retry at the same cap can spend the whole cap again, so after `max_review_budget_retries` retries (default 1) the task blocks with a reason that asks the operator to resume it with a higher review cap: `resume(task, review_budget_usd=...)` sets a per-task cap that replaces the config's from then on (add `extra_budget_usd` if the task's own budget cannot fund the larger review). The count lasts for the task's life and `resume` resets it.
 
 **Phase bound.** Between operator actions, a task runs at most `max_attempts × (1 + 2·(max_infra_retries + 1)) + max_review_budget_retries` phases before it is terminal or blocked. With defaults, 3 × 9 + 1 = 28.
 
@@ -290,7 +290,7 @@ The verification command (default `python3 -m pytest -q`, timeout 1200 s) runs o
 ```
 fleet  (fleet_budget_usd, $500)
 └── run:<plan>  (run_budget_usd, $100)
-    └── task:<id>  (budget_usd, default max_attempts × (attempt_budget + review_budget))
+    └── task:<id>  (budget_usd, default max_attempts × (attempt_budget + review_budget) + max_review_budget_retries × review_budget)
 ```
 
 - **Admission**: a phase starts only after `reserve(task, amount)` succeeds on *every* account up the chain. Worker amount = `attempt_budget`; reviewer = `review_budget`; integrator = 0.
@@ -320,7 +320,7 @@ fleet  (fleet_budget_usd, $500)
 | Worker edits outside its scope | changed-file check at submit | rework with the violating paths as feedback |
 | Worker produces no change | empty squash | rework |
 | Reviewer crashes, times out or errors | expiry or failure report | retry review (no attempt used); block after `max_infra_retries` |
-| Review stops at its budget cap | `error_max_budget_usd` result | retry review at most `max_review_budget_retries` times, then block for a higher `review_budget_usd` |
+| Review stops at its budget cap | `error_max_budget_usd` result | retry review at most `max_review_budget_retries` times, then block until resumed with a higher per-task `review_budget_usd` |
 | Attempt fails the tests | `verify_command` in the worktree before review | rework with the test output; no review is paid for |
 | Review rejects | verdict | rework with findings |
 | Integrator crashes mid-merge | lease expiry | `merge_unresolved`; next integrator claims the fence, then reconciles |
@@ -446,7 +446,7 @@ All keys optional; unknown keys are errors. Dollar values are decimal strings.
 | `max_infra_retries` | `3` | before a review or merge phase blocks |
 | `aging_interval_s` | `600` | seconds of waiting per priority point |
 | `verify_command`, `verify_timeout_s` | `["python3","-m","pytest","-q"]`, `1200` | run on the rebased tree; `[]` skips |
-| `verify_before_review` | `true` | also run `verify_command` in the worker's worktree before review; a failure is rework, not a paid review |
+| `verify_before_review` | `true` | also run `verify_command` in the worker's worktree before review; a failure is rework, not a paid review, unless the target moved since the attempt began (then the attempt is reviewed and the merge queue decides). The run is killed if the lease is lost |
 | `max_review_budget_retries` | `1` | reviews stopped at `review_budget_usd` retried before the task blocks |
 | `agents` | 4 workers, 1 reviewer, 1 integrator | `[{role, count, capabilities, prefix}]` |
 | `models.<planner\|worker\|reviewer\|triage>` | section 3 | `model, effort, fallback_model, permission_mode, tools, allowed_tools, disallowed_tools, timeout_s` |

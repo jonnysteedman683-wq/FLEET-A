@@ -16,7 +16,7 @@ from fleet_a.events import EventLog, project_states
 from fleet_a.executors import CallableExecutor, ExecRequest, ExecResult
 from fleet_a.git import Git
 from fleet_a.mergequeue import MergeQueue
-from fleet_a.model import AgentInfo, Role, TaskState, usd_to_micros
+from fleet_a.model import AgentInfo, MergeOutcome, MergeStatus, Role, TaskState, usd_to_micros
 from fleet_a.runner import AgentRunner, Fleet, clip_feedback, parse_review
 from fleet_a.workspaces import Workspaces
 
@@ -121,6 +121,108 @@ def test_fleet_lands_a_dag_with_rework(repo, tmp_path):
     assert git(repo, "worktree", "list").count("\n") == 0
 
 
+def test_stale_base_verify_failure_goes_to_review_not_rework(repo, tmp_path):
+    """The target moves while the attempt runs: a failure there is left to the merge queue."""
+
+    class MovesTarget(ScriptedModel):
+        def __call__(self, req):
+            result = super().__call__(req)
+            if req.prompt.startswith("TASK B:") and len([c for c in self.calls if c[0] == "work"]) == 1:
+                tree = git(repo, "rev-parse", "main^{tree}")
+                moved = git(repo, "commit-tree", tree, "-p", "main", "-m", "someone else lands")
+                git(repo, "update-ref", "refs/heads/main", moved)
+            return result
+
+    model = MovesTarget(broken_first={"B"})
+    coord, fleet, _ = build(repo, tmp_path, plan_of(spec("B", scope=["src/b.py"])), model)
+    report = fleet.run(timeout_s=60)
+    assert report.finished and coord.tasks["B"].state is TaskState.DONE, coord.summary()
+    assert ("review", "B", 1) in model.calls  # stale base: reviewed instead of reworked
+    assert coord.tasks["B"].feedback[0].startswith("merge verify_failed")  # the merge queue caught it
+
+
+def test_run_verify_stops_on_cancel_and_timeout(tmp_path):
+    from fleet_a.mergequeue import run_verify
+
+    # The command starts a grandchild; killing the process group must stop both.
+    sleeper = [sys.executable, "-c", "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); time.sleep(60)"]
+    cancel = threading.Event()
+    threading.Timer(0.3, cancel.set).start()
+    started = time.monotonic()
+    ok, out = run_verify(sleeper, 60, tmp_path, cancel=cancel)
+    assert not ok and "cancelled" in out and time.monotonic() - started < 10
+    started = time.monotonic()
+    ok, out = run_verify(sleeper, 0.5, tmp_path)
+    assert not ok and "timed out" in out and time.monotonic() - started < 10
+    assert run_verify([sys.executable, "-c", "print('fine')"], 30, tmp_path) == (True, "fine")
+    assert run_verify([], 30, tmp_path)[0] is True
+
+
+def test_run_verify_kills_group_members_that_ignore_sigterm(tmp_path):
+    import os
+
+    from fleet_a.mergequeue import run_verify
+
+    pidfile = tmp_path / "grandchild.pid"
+    grandchild = (
+        "import os,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"open({str(pidfile)!r},'w').write(str(os.getpid())); time.sleep(60)"
+    )
+    # The leader dies on SIGTERM (default action) while the grandchild ignores it.
+    leader = (
+        "import subprocess,sys,time; "
+        f"subprocess.Popen([sys.executable,'-c',{grandchild!r}]); time.sleep(60)"
+    )
+    ok, out = run_verify([sys.executable, "-c", leader], 1.5, tmp_path)
+    assert not ok and "timed out" in out
+    pid = int(pidfile.read_text())
+
+    def running(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        try:  # a zombie has exited; only its parent (or PID 1) has not reaped it yet
+            return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        except (OSError, IndexError):
+            return True
+
+    deadline = time.monotonic() + 5
+    while running(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not running(pid)
+
+
+def test_integrator_passes_its_lease_loss_event_to_the_merge_queue(repo, tmp_path):
+    """The integrator's heartbeat event reaches integrate(); once it is set, nothing is reported."""
+    from fleet_a.coordinator import ManualClock
+
+    plan = plan_of(spec("A", scope=["src/a.py"]))
+    conf = config(verify_command=(), lease_ttl_s={Role.WORKER: 30.0, Role.REVIEWER: 30.0, Role.INTEGRATOR: 0.3})
+    clock = ManualClock()
+    coord = Coordinator(plan, conf, clock, EventLog())
+    ws = Workspaces(Git(repo), tmp_path / "wt")
+    for agent in (AgentInfo("w1", Role.WORKER), AgentInfo("r1", Role.REVIEWER)):
+        runner = AgentRunner(coord, agent, conf, executor=CallableExecutor(ScriptedModel()), workspaces=ws)
+        assert runner.step()
+    assert coord.tasks["A"].state is TaskState.AWAITING_MERGE
+
+    seen = {}
+
+    class LosesLease:
+        def integrate(self, *args, cancel=None):
+            seen["cancel"] = cancel
+            clock.advance(60)  # the lease expires; the next heartbeat is refused and sets the event
+            cancel.wait(5)
+            return MergeOutcome(MergeStatus.VERIFY_FAILED, detail="verify command cancelled: lease lost")
+
+    integrator = AgentRunner(coord, AgentInfo("i1", Role.INTEGRATOR), conf, merge_queue=LosesLease())
+    assert integrator.step()
+    assert isinstance(seen["cancel"], threading.Event) and seen["cancel"].is_set()
+    assert not any(e.kind == "stale_rejected" for e in coord.events.events)  # nothing was reported
+    assert coord.tasks["A"].merge_unresolved  # the next integrator reconciles through the fence
+
+
 def test_without_verify_before_review_the_merge_queue_catches_it(repo, tmp_path):
     plan = plan_of(spec("B", scope=["src/b.py"]))
     model = ScriptedModel(broken_first={"B"})
@@ -147,7 +249,7 @@ def test_budget_capped_review_blocks_after_one_retry(repo, tmp_path):
     report = fleet.run(timeout_s=60)
     rec = coord.tasks["A"]
     assert not report.finished and rec.state is TaskState.BLOCKED, coord.summary()
-    assert len(reviews) == 2 and "raise review_budget_usd" in rec.reason
+    assert len(reviews) == 2 and "resume with a higher review_budget_usd" in rec.reason
 
 
 def test_blocked_worker_escalates_and_dependents_wait(repo, tmp_path):

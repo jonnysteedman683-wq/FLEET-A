@@ -266,11 +266,15 @@ class Simulator:
             if rec.state is S.BLOCKED and now - rec.state_since > 60.0:
                 if rng.random() < 0.6:
                     try:
+                        capped = "review_budget_usd" in rec.reason
                         coord.resume(
                             task_id,
                             "sim operator resume",
                             extra_attempts=1,
                             extra_budget_usd=2 * micros_to_usd(rec.spec.attempt_budget),
+                            review_budget_usd=2 * micros_to_usd(rec.review_budget or coord.config.review_budget)
+                            if capped
+                            else None,
                         )
                     except FleetError:
                         coord.cancel(task_id, "sim operator gave up")

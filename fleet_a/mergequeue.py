@@ -18,7 +18,11 @@ For one approved attempt it:
 
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -69,6 +73,8 @@ class MergeQueue:
         token: int,
         commit: str,
         write_scope: Iterable[str],
+        *,
+        cancel: threading.Event | None = None,
     ) -> MergeOutcome:
         fence = self.claim_fence(run_id, task_id, token)
         if fence is None:
@@ -91,9 +97,15 @@ class MergeQueue:
             outside = scope_violations(list(write_scope), changed)
             if outside:
                 return MergeOutcome(MergeStatus.SCOPE_VIOLATION, detail=f"outside write scope: {outside}")
-            ok, output = self.verify(scratch.path)
+            if cancel is not None and cancel.is_set():
+                return MergeOutcome(MergeStatus.VERIFY_FAILED, detail="verify command cancelled: lease lost")
+            ok, output = self.verify(scratch.path) if cancel is None else self.verify(scratch.path, cancel=cancel)
             if not ok:
                 return MergeOutcome(MergeStatus.VERIFY_FAILED, detail=output)
+            if cancel is not None and cancel.is_set():
+                # Lost during a passing verify: don't land. (A stale landing would still be safe,
+                # since the fence and find_landed reconcile it, but there is no reason to try.)
+                return MergeOutcome(MergeStatus.VERIFY_FAILED, detail="lease lost after verify; not landing")
             ref = fence_ref(run_id, task_id)
             land = self.git.run(
                 "update-ref",
@@ -156,27 +168,69 @@ class MergeQueue:
         return landed_tasks(self.git, self.target_ref, run_id)
 
 
-    def verify(self, path: Path) -> tuple[bool, str]:
-        return run_verify(self.verify_command, self.verify_timeout_s, path)
+    def verify(self, path: Path, *, cancel: threading.Event | None = None) -> tuple[bool, str]:
+        return run_verify(self.verify_command, self.verify_timeout_s, path, cancel)
 
 
-def run_verify(command: Sequence[str], timeout_s: float, path: Path) -> tuple[bool, str]:
-    """Run the verify command in ``path``: (passed, tail of its output). No command always passes."""
+def run_verify(
+    command: Sequence[str],
+    timeout_s: float,
+    path: Path,
+    cancel: threading.Event | None = None,
+    poll_s: float = 0.2,
+) -> tuple[bool, str]:
+    """Run the verify command in ``path``: (passed, tail of its output). No command always passes.
+
+    The command runs in its own process group. On timeout, or once ``cancel`` is set (a worker
+    whose lease was lost), the whole group is killed and the run counts as failed.
+    """
     if not command:
         return True, "no verify command configured"
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             list(command),
             cwd=str(path),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout_s,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        return False, f"verify command timed out after {timeout_s:.0f}s"
     except OSError as exc:
         return False, f"verify command could not start: {exc}"
-    return proc.returncode == 0, _tail(proc.stdout + "\n" + proc.stderr)
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            out, err = proc.communicate(timeout=poll_s)
+            return proc.returncode == 0, _tail(out + "\n" + err)
+        except subprocess.TimeoutExpired:
+            if cancel is not None and cancel.is_set():
+                _kill_group(proc)
+                return False, "verify command cancelled: lease lost"
+            if time.monotonic() >= deadline:
+                _kill_group(proc)
+                return False, f"verify command timed out after {timeout_s:.0f}s"
+
+
+def _kill_group(proc: subprocess.Popen[str], grace_s: float = 5.0) -> None:
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            break
+        try:
+            proc.wait(timeout=grace_s)
+            break
+        except subprocess.TimeoutExpired:
+            continue
+    # The leader may have exited on SIGTERM while other members ignored it: reap the rest.
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        proc.communicate(timeout=grace_s)
+    except (subprocess.TimeoutExpired, ValueError):
+        pass
 
 
 def landed_tasks(git: Git, target_ref: str, run_id: str) -> dict[str, dict[str, object]]:

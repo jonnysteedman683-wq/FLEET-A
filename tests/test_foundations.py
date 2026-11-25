@@ -198,6 +198,8 @@ def test_config_from_dict_merges_and_validates():
     assert cfg.models["worker"].effort == "high" and cfg.models["worker"].model == "claude-sonnet-5-5"
     assert cfg.verify_command == ("make", "test")
     assert cfg.verify_before_review is True and cfg.max_review_budget_retries == 1
+    # 3 attempts x ($2 + $1.50 review) + 1 review retry x $1.50
+    assert FleetConfig().default_task_budget(2_000_000, 3) == 3 * 3_500_000 + 1_500_000
     tuned = FleetConfig.from_dict({"verify_before_review": False, "max_review_budget_retries": 0})
     assert tuned.verify_before_review is False and tuned.max_review_budget_retries == 0
     for bad in (

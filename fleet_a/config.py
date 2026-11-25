@@ -151,10 +151,12 @@ class FleetConfig:
     verify_command: tuple[str, ...] = ("python3", "-m", "pytest", "-q")
     verify_timeout_s: float = 1200.0
     # Run verify_command in the worker's worktree before review: a failing attempt goes straight
-    # back to rework with the test output, and no paid review is spent on it.
+    # back to rework with the test output, and no paid review is spent on it. If the target moved
+    # since the attempt began, a failure is reviewed anyway and the merge queue's verify decides.
     verify_before_review: bool = True
     # A review that hits review_budget is retried this many times, then the task is BLOCKED for
-    # the operator to raise review_budget_usd: each retry at the same cap can spend all of it again.
+    # the operator to resume with a higher per-task review cap: each retry at the same cap can spend
+    # all of it again.
     max_review_budget_retries: int = 1
     agents: tuple[AgentPool, ...] = DEFAULT_AGENTS
     models: Mapping[str, ModelProfile] = field(default_factory=lambda: dict(DEFAULT_MODELS))
@@ -267,7 +269,8 @@ class FleetConfig:
         return self.lease_ttl_s[role]
 
     def default_task_budget(self, attempt_budget: int, max_attempts: int) -> int:
-        return max_attempts * (attempt_budget + self.review_budget)
+        """Every attempt and its review, plus the review retries a budget cap may trigger."""
+        return max_attempts * (attempt_budget + self.review_budget) + self.max_review_budget_retries * self.review_budget
 
     def _pool_tags(self, role: Role) -> frozenset[str]:
         return frozenset().union(*(p.capabilities for p in self.agents if p.role is role and p.count > 0))

@@ -138,7 +138,7 @@ class AgentRunner:
                 elif assignment.role is Role.REVIEWER:
                     self._review(assignment, hb.lost)
                 else:
-                    self._integrate(assignment)
+                    self._integrate(assignment, hb.lost)
             except StaleLease as exc:
                 log.warning("%s lost lease %d on %s: %s", self.agent.id, token, task_id, exc)
         return True
@@ -184,13 +184,21 @@ class AgentRunner:
                 self.coord.fail(a.task.id, a.token, "attempt produced no changes", cost_usd=cost)
                 return
             if self.config.verify_before_review:
-                passed, output = run_verify(self.config.verify_command, self.config.verify_timeout_s, worktree.path)
+                passed, output = run_verify(
+                    self.config.verify_command, self.config.verify_timeout_s, worktree.path, cancel=lost
+                )
                 if lost.is_set():
                     return
                 if not passed:
-                    # Rework with the test output; the merge queue verifies again on the rebased tree.
-                    self.coord.fail(a.task.id, a.token, f"verify_failed before review: {output}", cost_usd=cost)
-                    return
+                    tip = self.workspaces.git.rev_parse(f"refs/heads/{a.target_branch}")
+                    if tip == worktree.base:
+                        # Rework with the test output; nothing newer on the target could fix it.
+                        self.coord.fail(a.task.id, a.token, f"verify_failed before review: {output}", cost_usd=cost)
+                        return
+                    # The target moved since this attempt started, and the change might pass on
+                    # top of it: don't spend an attempt. Review it; the merge queue verifies the
+                    # rebased tree before anything lands.
+                    log.info("%s: %s failed verify on a stale base; sending it to review", self.agent.id, a.task.id)
             self.coord.submit_work(
                 a.task.id,
                 a.token,
@@ -256,17 +264,21 @@ class AgentRunner:
             if worktree is not None:
                 self.workspaces.remove(worktree)
 
-    def _integrate(self, a: Assignment) -> None:
+    def _integrate(self, a: Assignment, lost: threading.Event | None = None) -> None:
         assert self.merge_queue is not None
         if not a.commit:
             raise FleetError(f"merge assignment for {a.task.id} has no commit")
         try:
             outcome = self.merge_queue.integrate(
-                a.run_id, a.task.id, a.attempt, a.token, a.commit, a.task.write_scope
+                a.run_id, a.task.id, a.attempt, a.token, a.commit, a.task.write_scope, cancel=lost
             )
         except Exception as exc:
             log.exception("%s: integrator error on %s", self.agent.id, a.task.id)
             self.coord.fail(a.task.id, a.token, f"integrator runtime error: {exc!r}")
+            return
+        if lost is not None and lost.is_set():
+            # The coordinator already reclaimed the task; whatever happened here is reconciled by
+            # the next integrator through the fence and find_landed, so report nothing.
             return
         log.info("%s: %s -> %s %s", self.agent.id, a.task.id, outcome.status.value, outcome.detail[:200])
         self.coord.submit_merge(a.task.id, a.token, outcome)

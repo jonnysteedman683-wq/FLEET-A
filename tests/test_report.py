@@ -307,10 +307,26 @@ class MainTests(unittest.TestCase):
             ]
 
         nan_data = {"charged_usd": 0.1, "x": float("nan")}
+        def interior_ts(ts):
+            """A bad timestamp on a middle event, which the duration (first to last) never reads."""
+            return spend({"charged_usd": 0.1}, ts=ts) + [
+                {"seq": 2, "ts": 2.0, "kind": "spend", "task": "t1", "data": {"charged_usd": 0.1}}
+            ]
+
         cases = {
             "charged_usd abc": spend({"charged_usd": "abc"}),
             "data is a list": spend([]),
             "ts is a string": spend({"charged_usd": 0.1}, ts="abc"),
+            "charged_usd false": spend({"charged_usd": False}),
+            "charged_usd null": spend({"charged_usd": None}),
+            "charged_usd empty string": spend({"charged_usd": ""}),
+            "charged_usd empty list": spend({"charged_usd": []}),
+            "charged_usd too large": spend({"charged_usd": 10 ** 400}),
+            "ts too large": spend({"charged_usd": 0.1}, ts=10 ** 400),
+            "interior ts is a string": interior_ts("abc"),
+            "single event ts is a string": [
+                {"seq": 0, "ts": "abc", "kind": "plan", "task": None, "data": {"run": "r", "tasks": ["t1"]}}
+            ],
         }
         for name, bodies in list(cases.items()) + [("NaN in data", spend(nan_data))]:
             with self.subTest(name), tempfile.TemporaryDirectory() as d:
@@ -339,6 +355,12 @@ class MainTests(unittest.TestCase):
         log.append("spend", "t1", {"charged_usd": "abc"}, 2.0)
         with self.assertRaises(ValueError):
             report.summarize(log.events)
+
+    def test_number_rejects_non_finite_and_oversized(self):
+        for bad in (float("nan"), float("inf"), -float("inf"), 10 ** 400, True, "1", None):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                report._number(bad, "x")
+        self.assertEqual(report._number(3, "x"), 3.0)
 
 
 if __name__ == "__main__":
