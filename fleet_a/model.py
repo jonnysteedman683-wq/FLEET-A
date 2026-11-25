@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, DecimalException
 from enum import Enum
 from typing import Any, Mapping
 
@@ -33,7 +33,7 @@ def usd_to_micros(value: object) -> int:
         raise ValueError(f"dollar amount must be finite and >= 0: {value!r}")
     try:
         return int((amount * MICROS_PER_USD).quantize(Decimal(1), rounding=ROUND_HALF_UP))
-    except InvalidOperation as exc:  # too many digits for the decimal context
+    except DecimalException as exc:  # too many digits, or an exponent past the context's range
         raise ValueError(f"dollar amount too large: {value!r}") from exc
 
 
