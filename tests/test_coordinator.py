@@ -246,7 +246,7 @@ def test_resume_raises_the_review_cap_for_that_task():
     coord.fail("a", r.token, "error_max_budget_usd", cost_usd=0.5, budget_exhausted=True)
     rec = coord.tasks["a"]
     assert rec.state is S.BLOCKED and "$0.5 budget cap" in rec.reason
-    for bad in (0, -1, "abc"):
+    for bad in (0, -1, "abc", 1e30):  # 1e30 overflows the decimal context
         with pytest.raises(FleetError):
             coord.resume("a", review_budget_usd=bad)
     assert coord.resume("a", review_budget_usd=1.25, extra_budget_usd=2) is S.AWAITING_REVIEW
