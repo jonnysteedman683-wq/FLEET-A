@@ -121,6 +121,43 @@ def test_fleet_lands_a_dag_with_rework(repo, tmp_path):
     assert git(repo, "worktree", "list").count("\n") == 0
 
 
+def test_stale_base_verify_failure_goes_to_review_not_rework(repo, tmp_path):
+    """The target moves while the attempt runs: a failure there is left to the merge queue."""
+
+    class MovesTarget(ScriptedModel):
+        def __call__(self, req):
+            result = super().__call__(req)
+            if req.prompt.startswith("TASK B:") and len([c for c in self.calls if c[0] == "work"]) == 1:
+                tree = git(repo, "rev-parse", "main^{tree}")
+                moved = git(repo, "commit-tree", tree, "-p", "main", "-m", "someone else lands")
+                git(repo, "update-ref", "refs/heads/main", moved)
+            return result
+
+    model = MovesTarget(broken_first={"B"})
+    coord, fleet, _ = build(repo, tmp_path, plan_of(spec("B", scope=["src/b.py"])), model)
+    report = fleet.run(timeout_s=60)
+    assert report.finished and coord.tasks["B"].state is TaskState.DONE, coord.summary()
+    assert ("review", "B", 1) in model.calls  # stale base: reviewed instead of reworked
+    assert coord.tasks["B"].feedback[0].startswith("merge verify_failed")  # the merge queue caught it
+
+
+def test_run_verify_stops_on_cancel_and_timeout(tmp_path):
+    from fleet_a.mergequeue import run_verify
+
+    # The command starts a grandchild; killing the process group must stop both.
+    sleeper = [sys.executable, "-c", "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); time.sleep(60)"]
+    cancel = threading.Event()
+    threading.Timer(0.3, cancel.set).start()
+    started = time.monotonic()
+    ok, out = run_verify(sleeper, 60, tmp_path, cancel=cancel)
+    assert not ok and "cancelled" in out and time.monotonic() - started < 10
+    started = time.monotonic()
+    ok, out = run_verify(sleeper, 0.5, tmp_path)
+    assert not ok and "timed out" in out and time.monotonic() - started < 10
+    assert run_verify([sys.executable, "-c", "print('fine')"], 30, tmp_path) == (True, "fine")
+    assert run_verify([], 30, tmp_path)[0] is True
+
+
 def test_without_verify_before_review_the_merge_queue_catches_it(repo, tmp_path):
     plan = plan_of(spec("B", scope=["src/b.py"]))
     model = ScriptedModel(broken_first={"B"})
@@ -147,7 +184,7 @@ def test_budget_capped_review_blocks_after_one_retry(repo, tmp_path):
     report = fleet.run(timeout_s=60)
     rec = coord.tasks["A"]
     assert not report.finished and rec.state is TaskState.BLOCKED, coord.summary()
-    assert len(reviews) == 2 and "raise review_budget_usd" in rec.reason
+    assert len(reviews) == 2 and "resume with a higher review_budget_usd" in rec.reason
 
 
 def test_blocked_worker_escalates_and_dependents_wait(repo, tmp_path):

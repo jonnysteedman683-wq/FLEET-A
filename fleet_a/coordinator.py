@@ -96,6 +96,7 @@ class TaskRecord:
     attempts: int = 0
     infra_failures: int = 0
     review_budget_hits: int = 0
+    review_budget: int | None = None  # operator override of config.review_budget (micro-USD)
     author: str | None = None
     reviewer: str | None = None
     branch: str | None = None
@@ -372,8 +373,14 @@ class Coordinator:
         *,
         extra_attempts: int = 0,
         extra_budget_usd: float = 0.0,
+        review_budget_usd: float | None = None,
     ) -> TaskState:
-        """Return a BLOCKED task to its queue, optionally with more attempts and budget."""
+        """Return a BLOCKED task to its queue, optionally with more attempts and budget.
+
+        ``review_budget_usd`` replaces the per-review cap for this task from now on: the way out
+        of a block for a review that keeps hitting ``review_budget_usd``. A larger review may also
+        need ``extra_budget_usd`` for the task's own budget.
+        """
         with self._lock:
             now = self.clock.now()
             self._sweep(now)
@@ -383,6 +390,14 @@ class Coordinator:
             if extra_attempts < 0:
                 raise FleetError("extra_attempts must be >= 0")
             extra = usd_to_micros(extra_budget_usd)
+            review_cap = None
+            if review_budget_usd is not None:
+                try:
+                    review_cap = usd_to_micros(review_budget_usd)
+                except ValueError as exc:
+                    raise FleetError(f"review_budget_usd: {exc}") from exc
+                if review_cap <= 0:
+                    raise FleetError("review_budget_usd must be > 0")
             target = rec.resume_to or S.READY
             if target in (S.PENDING, S.READY):
                 if rec.attempts >= rec.max_attempts + extra_attempts:
@@ -394,6 +409,8 @@ class Coordinator:
             if extra:
                 self.ledger.raise_limit(task_account(task_id), extra)
             rec.max_attempts += extra_attempts
+            if review_cap is not None:
+                rec.review_budget = review_cap
             if note:
                 rec.feedback.append(f"operator: {note}")
             rec.infra_failures = 0
@@ -406,6 +423,7 @@ class Coordinator:
                 "resumed by operator",
                 extra_attempts=extra_attempts,
                 extra_budget_usd=micros_to_usd(extra),
+                review_budget_usd=None if review_cap is None else micros_to_usd(review_cap),
             )
             return target
 
@@ -505,7 +523,7 @@ class Coordinator:
         if role is Role.WORKER:
             return rec.spec.attempt_budget
         if role is Role.REVIEWER:
-            return self.config.review_budget
+            return rec.review_budget if rec.review_budget is not None else self.config.review_budget
         return 0
 
     def _reserve(self, rec: TaskRecord, role: Role, now: float) -> Reservation | None:
@@ -637,13 +655,14 @@ class Coordinator:
         rec.review_budget_hits += 1
         if rec.review_budget_hits > self.config.max_review_budget_retries:
             rec.resume_to = back
-            cap = micros_to_usd(self.config.review_budget)
+            cap = micros_to_usd(self._phase_amount(rec, Role.REVIEWER))
             self._transition(
                 rec,
                 S.BLOCKED,
                 now,
                 f"review hit its ${cap} budget cap {rec.review_budget_hits} time(s); "
-                f"raise review_budget_usd and resume: {reason}",
+                f"resume with a higher review_budget_usd (Coordinator.resume), or raise it in the "
+                f"config for the next run: {reason}",
             )
         else:
             self._transition(rec, back, now, f"retry after review budget cap: {reason}")

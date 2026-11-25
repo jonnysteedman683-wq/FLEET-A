@@ -229,12 +229,33 @@ def test_budget_capped_review_retries_once_then_blocks():
     assert rec.state is S.AWAITING_REVIEW and rec.review_budget_hits == 1
     r = coord.acquire(R1)
     coord.fail("a", r.token, "review session failed: error_max_budget_usd", cost_usd=0.5, budget_exhausted=True)
-    assert rec.state is S.BLOCKED and "raise review_budget_usd" in rec.reason
+    assert rec.state is S.BLOCKED and "resume with a higher review_budget_usd" in rec.reason
     assert rec.infra_failures == 0 and coord.scopes.holds("a")
     assert coord.resume("a") is S.AWAITING_REVIEW and rec.review_budget_hits == 0
     r = coord.acquire(R1)
     coord.fail("a", r.token, "api 529")  # an ordinary infra error still takes the infra path
     assert rec.state is S.AWAITING_REVIEW and rec.infra_failures == 1 and rec.review_budget_hits == 0
+
+
+def test_resume_raises_the_review_cap_for_that_task():
+    coord, _ = make(spec("a"), spec("b", scope=["docs/"]), max_review_budget_retries=0)
+    a = coord.acquire(W1)
+    coord.submit_work("a", a.token, work("a"))
+    r = coord.acquire(R1)
+    assert r.budget_usd == 0.5  # the config's review cap
+    coord.fail("a", r.token, "error_max_budget_usd", cost_usd=0.5, budget_exhausted=True)
+    rec = coord.tasks["a"]
+    assert rec.state is S.BLOCKED and "$0.5 budget cap" in rec.reason
+    for bad in (0, -1, "abc"):
+        with pytest.raises(FleetError):
+            coord.resume("a", review_budget_usd=bad)
+    assert coord.resume("a", review_budget_usd=1.25, extra_budget_usd=2) is S.AWAITING_REVIEW
+    assert coord.acquire(R1).budget_usd == 1.25 and rec.review_budget == usd_to_micros("1.25")
+    resumed = [e for e in coord.events.events if e.data.get("reason") == "resumed by operator"]
+    assert resumed[-1].data["review_budget_usd"] == 1.25
+    b = coord.acquire(W2)
+    coord.submit_work("b", b.token, work("b", files=("docs/x.md",)))
+    assert coord.acquire(AgentInfo("r2", Role.REVIEWER)).budget_usd == 0.5  # other tasks keep the config cap
 
 
 def test_budget_capped_worker_is_ordinary_rework():

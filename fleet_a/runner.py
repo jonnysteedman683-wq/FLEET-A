@@ -184,13 +184,21 @@ class AgentRunner:
                 self.coord.fail(a.task.id, a.token, "attempt produced no changes", cost_usd=cost)
                 return
             if self.config.verify_before_review:
-                passed, output = run_verify(self.config.verify_command, self.config.verify_timeout_s, worktree.path)
+                passed, output = run_verify(
+                    self.config.verify_command, self.config.verify_timeout_s, worktree.path, cancel=lost
+                )
                 if lost.is_set():
                     return
                 if not passed:
-                    # Rework with the test output; the merge queue verifies again on the rebased tree.
-                    self.coord.fail(a.task.id, a.token, f"verify_failed before review: {output}", cost_usd=cost)
-                    return
+                    tip = self.workspaces.git.rev_parse(f"refs/heads/{a.target_branch}")
+                    if tip == worktree.base:
+                        # Rework with the test output; nothing newer on the target could fix it.
+                        self.coord.fail(a.task.id, a.token, f"verify_failed before review: {output}", cost_usd=cost)
+                        return
+                    # The target moved since this attempt started, and the change might pass on
+                    # top of it: don't spend an attempt. Review it; the merge queue verifies the
+                    # rebased tree before anything lands.
+                    log.info("%s: %s failed verify on a stale base; sending it to review", self.agent.id, a.task.id)
             self.coord.submit_work(
                 a.task.id,
                 a.token,

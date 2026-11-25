@@ -11,6 +11,7 @@ is reported as it stands; the header's "finished" count shows how many tasks hav
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 from typing import Any, Optional, Sequence
@@ -28,20 +29,31 @@ def _printable(value: Any) -> str:
 
 
 def _number(value: Any, what: str) -> float:
-    """A real number from the log, or ValueError; bools and numeric strings are malformed."""
+    """A finite real number from the log, or ValueError.
+
+    Bools, numeric strings, NaN, infinities and integers too large for a float are malformed.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError("malformed %s: %r is not a number" % (what, value))
-    return float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        raise ValueError("malformed %s: integer too large" % what) from None
+    if not math.isfinite(number):
+        raise ValueError("malformed %s: %r is not finite" % (what, value))
+    return number
 
 
 def summarize(events: Sequence[Event]) -> dict:
     """Fold an event sequence into a per-run summary dict, tasks in the plan event's order.
 
-    Raises ValueError on malformed event data (non-object data, non-numeric charged_usd or ts).
+    Raises ValueError on malformed event data (non-object data, a charged_usd or ts that is not a
+    finite number).
     """
     for ev in events:
         if not isinstance(ev.data, dict):
             raise ValueError("malformed event %s: data is not an object" % ev.seq)
+        _number(ev.ts, "ts")  # every event, not only the first and last that set the duration
     run = None
     plan = None
     tasks: dict[str, dict[str, Any]] = {}
@@ -70,7 +82,7 @@ def summarize(events: Sequence[Event]) -> dict:
     for ev in events:
         data = ev.data or {}
         if ev.kind == "spend":
-            amount = _number(data.get("charged_usd") or 0.0, "charged_usd")
+            amount = _number(data.get("charged_usd", 0.0), "charged_usd")  # null, false, "" are malformed
             total += amount
             rec = tasks.get(ev.task) if ev.task is not None else None
             if rec is not None:
