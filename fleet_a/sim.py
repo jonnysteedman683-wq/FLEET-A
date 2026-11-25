@@ -367,7 +367,7 @@ class Simulator:
                     task_id,
                     token,
                     WorkResult(
-                        branch=f"fleet/{task_id}/a{a.attempt}-t{token}",
+                        branch=f"fleet/{coord.run_id}/{task_id}/a{a.attempt}-t{token}",
                         commit=f"c{token}",
                         base_commit=f"v{self.target.version}",
                         changed_files=self._files(a.task),

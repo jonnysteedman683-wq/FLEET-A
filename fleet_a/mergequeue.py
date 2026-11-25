@@ -78,7 +78,7 @@ class MergeQueue:
             return MergeOutcome(MergeStatus.MERGED, landed, "already on target (reconciled)")
 
         base = self.git.rev_parse(self.target_ref)
-        scratch = self.workspaces.checkout_detached(commit, f"merge-{task_id}-a{attempt}-t{token}", base)
+        scratch = self.workspaces.checkout_detached(commit, f"{run_id}/merge-{task_id}-a{attempt}-t{token}", base)
         try:
             rebase = self.git.run("rebase", "-q", base, cwd=scratch.path, check=False)
             if rebase.returncode != 0:

@@ -9,6 +9,7 @@ import pytest
 
 from conftest import git, spec
 
+from fleet_a.errors import FleetError
 from fleet_a.git import Git
 from fleet_a.mergequeue import MergeQueue, fence_ref, landed_tasks
 from fleet_a.model import Assignment, MergeStatus, Role
@@ -27,7 +28,7 @@ def setup(repo: Path, tmp_path: Path, verify=OK):
 
 
 def attempt(ws: Workspaces, task_id: str, n: int, token: int, files: dict[str, str], run: str = RUN, summary: str = "summary") -> str:
-    wt = ws.create_worktree(task_id, n, token, "main")
+    wt = ws.create_worktree(run, task_id, n, token, "main")
     for rel, text in files.items():
         p = wt.path / rel
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -41,8 +42,9 @@ def attempt(ws: Workspaces, task_id: str, n: int, token: int, files: dict[str, s
 
 def test_worktree_branch_naming_squash_and_cleanup(repo, tmp_path):
     g, ws, _ = setup(repo, tmp_path)
-    wt = ws.create_worktree("T1", 2, 7, "main")
-    assert wt.branch == "fleet/T1/a2-t7" and wt.path.name == "T1-a2-t7"
+    wt = ws.create_worktree(RUN, "T1", 2, 7, "main")
+    assert wt.branch == f"fleet/{RUN}/T1/a2-t7"
+    assert wt.path.name == "T1-a2-t7" and wt.path.parent.name == RUN
     assert ws.squash_commit(wt, "nothing") is None
     (wt.path / "src" / "new.py").write_text("X = 1\n")
     (wt.path / "README.md").unlink()
@@ -54,7 +56,35 @@ def test_worktree_branch_naming_squash_and_cleanup(repo, tmp_path):
     assert ws.changed_files(wt.base, commit) == ["README.md", "src/more.py", "src/new.py"]
     ws.remove(wt)
     assert not wt.path.exists()
-    assert git(repo, "rev-parse", "fleet/T1/a2-t7") == commit
+    assert git(repo, "rev-parse", f"fleet/{RUN}/T1/a2-t7") == commit
+
+
+def test_worktree_rejects_missing_run_id_and_escaping_names(repo, tmp_path):
+    g, ws, _ = setup(repo, tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("must survive\n")
+    for bad in ("", "a/b", "..", "x..y", "-x"):
+        with pytest.raises(FleetError, match="valid run id"):
+            ws.create_worktree(bad, "T1", 1, 1, "main")
+    head = git(repo, "rev-parse", "HEAD")
+    for name in ("/review-T1-a1-t1", "../outside", f"{outside}", "run/../../outside", "."):
+        with pytest.raises(FleetError, match="outside the worktrees root"):
+            ws.checkout_detached(head, name)
+    assert (outside / "keep.txt").read_text() == "must survive\n"
+    assert git(repo, "for-each-ref", "--format=%(refname)", "refs/heads/fleet") == ""
+
+
+def test_second_run_does_not_collide_with_first_runs_leftovers(repo, tmp_path):
+    # Fencing tokens restart at 1 in every run, so a rerun of the same plan reuses task, attempt
+    # and token. The first run's blocked attempt left its branch and worktree behind.
+    g, ws, _ = setup(repo, tmp_path)
+    first = ws.create_worktree("p1-run1", "T1", 1, 1, "main")
+    (first.path / "left.txt").write_text("from run 1\n")
+    second = ws.create_worktree("p1-run2", "T1", 1, 1, "main")
+    assert second.branch != first.branch and second.path != first.path
+    assert first.path.exists() and (first.path / "left.txt").exists()
+    assert git(repo, "rev-parse", first.branch) == git(repo, "rev-parse", second.branch)
 
 
 def test_merge_lands_with_trailers_and_reconciles_idempotently(repo, tmp_path):

@@ -150,7 +150,7 @@ class AgentRunner:
         cost = 0.0
         worktree = None
         try:
-            worktree = self.workspaces.create_worktree(a.task.id, a.attempt, a.token, a.target_branch)
+            worktree = self.workspaces.create_worktree(a.run_id, a.task.id, a.attempt, a.token, a.target_branch)
             feedback, triage_cost = self._condense(a, lost)
             cost += triage_cost
             remaining = round(a.budget_usd - triage_cost, 4)
@@ -212,7 +212,7 @@ class AgentRunner:
         worktree = None
         try:
             worktree = self.workspaces.checkout_detached(
-                a.commit, f"review-{a.task.id}-a{a.attempt}-t{a.token}", a.base_commit
+                a.commit, f"{a.run_id}/review-{a.task.id}-a{a.attempt}-t{a.token}", a.base_commit
             )
             result = self.executor.run(
                 ExecRequest(
