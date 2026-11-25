@@ -254,6 +254,26 @@ class MainTests(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertIn("projected state", err)
 
+    def test_event_missing_field(self):
+        cases = {
+            "plan without tasks": [("plan", None, {"run": "r"})],
+            "transition without from": [
+                ("plan", None, {"run": "r", "tasks": ["t1"]}),
+                ("transition", "t1", {"to": "running", "attempt": 1}),
+            ],
+        }
+        for name, events in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                path = Path(d) / "events.jsonl"
+                log = EventLog(path)
+                for ts, (kind, task, data) in enumerate(events):
+                    log.append(kind, task, data, float(ts))
+                log.close()
+                code, out, err = self.run_main(path)
+                self.assertEqual(code, 1)
+                self.assertEqual(out, "")
+                self.assertTrue(err.strip())
+
     def test_non_object_line(self):
         for line in ("[]", "null", "5"):
             with self.subTest(line=line), tempfile.TemporaryDirectory() as d:

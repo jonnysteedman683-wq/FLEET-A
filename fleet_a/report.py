@@ -127,8 +127,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except OSError as exc:
         print("error: cannot read %s: %s" % (args.events, exc), file=sys.stderr)
         return 2
-    except (FleetError, TypeError) as exc:
+    except (FleetError, TypeError, KeyError) as exc:
         # TypeError: a line that is valid JSON but not an object, which EventLog.load does not wrap.
+        # KeyError: a well-hashed plan or transition event missing a field project_states reads.
         print("error: %s: %s" % (args.events, exc), file=sys.stderr)
         return 1
     print(format_report(summarize(events)))
