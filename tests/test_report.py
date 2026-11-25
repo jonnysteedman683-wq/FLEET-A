@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import io
 import tempfile
 import unittest
@@ -9,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from fleet_a import report
-from fleet_a.events import EventLog
+from fleet_a.events import GENESIS, EventLog, _digest
 
 
 def add_plan(log, ts, tasks=("t1", "t2")):
@@ -283,6 +284,48 @@ class MainTests(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertEqual(out, "")
                 self.assertTrue(err.strip())
+
+    def test_malformed_but_hashed(self):
+        def spend(data, ts=1.0):
+            return [
+                {"seq": 0, "ts": 0.0, "kind": "plan", "task": None,
+                 "data": {"run": "r", "tasks": ["t1"]}},
+                {"seq": 1, "ts": ts, "kind": "spend", "task": "t1", "data": data},
+            ]
+
+        nan_data = {"charged_usd": 0.1, "x": float("nan")}
+        cases = {
+            "charged_usd abc": spend({"charged_usd": "abc"}),
+            "data is a list": spend([]),
+            "ts is a string": spend({"charged_usd": 0.1}, ts="abc"),
+        }
+        for name, bodies in list(cases.items()) + [("NaN in data", spend(nan_data))]:
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                path = Path(d) / "events.jsonl"
+                prev, lines = GENESIS, []
+                for body in bodies:
+                    body = {**body, "prev": prev}
+                    try:
+                        h = _digest(body)
+                    except ValueError:  # NaN cannot be hashed canonically; any hash will do
+                        h = "f" * 64
+                    prev = h
+                    text = json.dumps({**body, "hash": h}, sort_keys=True)  # allows NaN
+                    lines.append(text)
+                path.write_text("\n".join(lines) + "\n")
+                code, out, err = self.run_main(path)
+                self.assertEqual(code, 1)
+                self.assertEqual(out, "")
+                self.assertEqual(len(err.strip().splitlines()), 1)
+                self.assertTrue(err.startswith("error:"))
+                self.assertNotIn("Traceback", err)
+
+    def test_summarize_rejects_malformed(self):
+        log = EventLog()
+        add_plan(log, 1.0)
+        log.append("spend", "t1", {"charged_usd": "abc"}, 2.0)
+        with self.assertRaises(ValueError):
+            report.summarize(log.events)
 
 
 if __name__ == "__main__":

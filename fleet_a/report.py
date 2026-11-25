@@ -27,8 +27,21 @@ def _printable(value: Any) -> str:
     return "".join(c if c.isprintable() else c.encode("unicode_escape").decode("ascii") for c in text)
 
 
+def _number(value: Any, what: str) -> float:
+    """A real number from the log, or ValueError; bools and numeric strings are malformed."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("malformed %s: %r is not a number" % (what, value))
+    return float(value)
+
+
 def summarize(events: Sequence[Event]) -> dict:
-    """Fold an event sequence into a per-run summary dict, tasks in the plan event's order."""
+    """Fold an event sequence into a per-run summary dict, tasks in the plan event's order.
+
+    Raises ValueError on malformed event data (non-object data, non-numeric charged_usd or ts).
+    """
+    for ev in events:
+        if not isinstance(ev.data, dict):
+            raise ValueError("malformed event %s: data is not an object" % ev.seq)
     run = None
     plan = None
     tasks: dict[str, dict[str, Any]] = {}
@@ -50,14 +63,14 @@ def summarize(events: Sequence[Event]) -> dict:
 
     duration = 0.0
     if len(events) > 1:
-        duration = float(events[-1].ts) - float(events[0].ts)
+        duration = _number(events[-1].ts, "ts") - _number(events[0].ts, "ts")
 
     total = 0.0
     stale = 0
     for ev in events:
         data = ev.data or {}
         if ev.kind == "spend":
-            amount = float(data.get("charged_usd", 0.0) or 0.0)
+            amount = _number(data.get("charged_usd") or 0.0, "charged_usd")
             total += amount
             rec = tasks.get(ev.task) if ev.task is not None else None
             if rec is not None:
@@ -124,15 +137,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         events = EventLog.load(args.events)
         EventLog.verify(events)
         project_states(events)  # a well-hashed log can still hold a transition from the wrong state
+        text = format_report(summarize(events))
     except OSError as exc:
         print("error: cannot read %s: %s" % (args.events, exc), file=sys.stderr)
         return 2
-    except (FleetError, TypeError, KeyError) as exc:
+    except (FleetError, TypeError, KeyError, ValueError, AttributeError) as exc:
         # TypeError: a line that is valid JSON but not an object, which EventLog.load does not wrap.
         # KeyError: a well-hashed plan or transition event missing a field project_states reads.
         print("error: %s: %s" % (args.events, exc), file=sys.stderr)
         return 1
-    print(format_report(summarize(events)))
+    print(text)
     return 0
 
 
