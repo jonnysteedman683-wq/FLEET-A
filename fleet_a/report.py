@@ -136,6 +136,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         events = EventLog.load(args.events)
         EventLog.verify(events)
+        plans = [ev for ev in events if ev.kind == "plan"]
+        if len(plans) > 1:
+            raise ValueError(
+                "repeated plan event: %d plan events (seq %s), expected exactly one"
+                % (len(plans), ", ".join(str(ev.seq) for ev in plans))
+            )
         project_states(events)  # a well-hashed log can still hold a transition from the wrong state
         text = format_report(summarize(events))
     except OSError as exc:

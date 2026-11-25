@@ -255,6 +255,19 @@ class MainTests(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertIn("projected state", err)
 
+    def test_repeated_plan_event(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "events.jsonl"
+            log = EventLog(path)
+            add_plan(log, 100.0)
+            add_plan(log, 101.0)
+            log.close()
+            code, out, err = self.run_main(path)
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertTrue(err.startswith("error:"))
+        self.assertIn("repeated plan event", err)
+
     def test_event_missing_field(self):
         cases = {
             "plan without tasks": [("plan", None, {"run": "r"})],
