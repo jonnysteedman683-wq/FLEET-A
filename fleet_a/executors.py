@@ -39,6 +39,7 @@ class ExecResult:
     error: str | None = None
     retryable: bool = True
     session_id: str | None = None
+    budget_exhausted: bool = False  # the session stopped at its --max-budget-usd cap
 
 
 class Executor(Protocol):
@@ -192,6 +193,7 @@ class ClaudeCodeExecutor:
                 structured=structured,
                 error=f"{subtype}: {result_text[-1000:] or stderr.strip()[-1000:]}",
                 session_id=session_id,
+                budget_exhausted=subtype == "error_max_budget_usd",
             )
         if request.json_schema is not None and structured is None:
             return ExecResult(

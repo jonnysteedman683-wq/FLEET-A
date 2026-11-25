@@ -145,16 +145,16 @@ Not drawn: every non-terminal state except `merging` can go to `blocked` and to 
 | pending → ready | every dependency is `done` (checked at start, when a dependency lands, and on resume) |
 | ready → running | worker `acquire`: agent has the task's capabilities, the scope is free, the attempt budget is reserved, `attempts < max_attempts`; `attempts += 1`, scope locked |
 | ready → blocked | the task account cannot fund another attempt (resume to `ready`); or operator |
-| running → awaiting_review | `submit_work` with the live token, non-empty change, every changed path inside the scope |
-| running → ready / failed | **rework**: retryable failure, lease expiry, scope violation, empty attempt; `failed` once `attempts == max_attempts` |
+| running → awaiting_review | `submit_work` with the live token, non-empty change, every changed path inside the scope; with `verify_before_review`, `verify_command` passed in the worktree first |
+| running → ready / failed | **rework**: retryable failure, lease expiry, scope violation, empty attempt, `verify_failed before review`; `failed` once `attempts == max_attempts` |
 | running → failed | non-retryable worker failure |
 | running → blocked | worker reports `status: "blocked"` (escalation), or operator |
 | awaiting_review → reviewing | reviewer `acquire`: capabilities match, **reviewer ≠ author**, review budget reserved |
 | awaiting_review → blocked | the task account cannot fund the review (scope stays held); or operator |
 | reviewing → awaiting_merge | verdict approves and has no `blocker` or `major` finding |
 | reviewing → ready / failed | rejected: rework with the findings as feedback |
-| reviewing → awaiting_review | reviewer failure or lease expiry, while `infra_failures ≤ max_infra_retries` |
-| reviewing → blocked | infra retries exhausted, non-retryable reviewer failure, or operator |
+| reviewing → awaiting_review | reviewer failure or lease expiry, while `infra_failures ≤ max_infra_retries`; a review stopped at its budget cap, while `review_budget_hits ≤ max_review_budget_retries` |
+| reviewing → blocked | infra retries exhausted, review budget cap hit more than `max_review_budget_retries` times, non-retryable reviewer failure, or operator |
 | awaiting_merge → merging | integrator `acquire`, FIFO by approval time; at most one task merging |
 | merging → done | outcome `merged` (landed now, or found already landed) |
 | merging → awaiting_merge | `target_moved`, `fenced`, integrator failure or lease expiry, while within `max_infra_retries` |
@@ -166,11 +166,13 @@ Not drawn: every non-terminal state except `merging` can go to `blocked` and to 
 
 ### 5.2 Rework, attempts and infrastructure retries
 
-**Attempts** measure work quality. One is consumed per worker lease. Anything wrong with the *work* (failed tests, rejected review, merge conflict, verify failure, scope violation, empty change, worker crash) sends the task back to `ready` with the reason appended to its feedback, until `max_attempts` is reached and it fails.
+**Attempts** measure work quality. One is consumed per worker lease. Anything wrong with the *work* (failed tests, including `verify_command` run in the worker's worktree before review when `verify_before_review` is on, rejected review, merge conflict, verify failure, scope violation, empty change, worker crash) sends the task back to `ready` with the reason appended to its feedback, until `max_attempts` is reached and it fails.
 
 **Infrastructure retries** measure everything else (reviewer crash, integrator crash, target moved). They do not consume attempts. `infra_failures` resets when an attempt is submitted and when it is approved. Past `max_infra_retries` the task blocks for a human instead of looping.
 
-**Phase bound.** Between operator actions, a task runs at most `max_attempts × (1 + 2·(max_infra_retries + 1))` phases before it is terminal or blocked. With defaults, 3 × 9 = 27.
+**Review budget caps** are counted apart from both. A review that stops at `review_budget_usd` (the session's `error_max_budget_usd` result) increments `review_budget_hits` instead of `infra_failures`: a retry at the same cap can spend the whole cap again, so after `max_review_budget_retries` retries (default 1) the task blocks with a reason that asks the operator to raise `review_budget_usd`. The count lasts for the task's life and `resume` resets it.
+
+**Phase bound.** Between operator actions, a task runs at most `max_attempts × (1 + 2·(max_infra_retries + 1)) + max_review_budget_retries` phases before it is terminal or blocked. With defaults, 3 × 9 + 1 = 28.
 
 ### 5.3 Cancel and block
 
@@ -318,6 +320,8 @@ fleet  (fleet_budget_usd, $500)
 | Worker edits outside its scope | changed-file check at submit | rework with the violating paths as feedback |
 | Worker produces no change | empty squash | rework |
 | Reviewer crashes, times out or errors | expiry or failure report | retry review (no attempt used); block after `max_infra_retries` |
+| Review stops at its budget cap | `error_max_budget_usd` result | retry review at most `max_review_budget_retries` times, then block for a higher `review_budget_usd` |
+| Attempt fails the tests | `verify_command` in the worktree before review | rework with the test output; no review is paid for |
 | Review rejects | verdict | rework with findings |
 | Integrator crashes mid-merge | lease expiry | `merge_unresolved`; next integrator claims the fence, then reconciles |
 | Stale integrator tries to land | fence verify in the landing transaction | nothing lands (`fenced`) |
@@ -442,6 +446,8 @@ All keys optional; unknown keys are errors. Dollar values are decimal strings.
 | `max_infra_retries` | `3` | before a review or merge phase blocks |
 | `aging_interval_s` | `600` | seconds of waiting per priority point |
 | `verify_command`, `verify_timeout_s` | `["python3","-m","pytest","-q"]`, `1200` | run on the rebased tree; `[]` skips |
+| `verify_before_review` | `true` | also run `verify_command` in the worker's worktree before review; a failure is rework, not a paid review |
+| `max_review_budget_retries` | `1` | reviews stopped at `review_budget_usd` retried before the task blocks |
 | `agents` | 4 workers, 1 reviewer, 1 integrator | `[{role, count, capabilities, prefix}]` |
 | `models.<planner\|worker\|reviewer\|triage>` | section 3 | `model, effort, fallback_model, permission_mode, tools, allowed_tools, disallowed_tools, timeout_s` |
 | `git_name`, `git_email` | `FLEET-A`, `fleet-a@localhost` | identity for fleet commits |

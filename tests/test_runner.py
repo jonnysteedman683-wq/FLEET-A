@@ -108,7 +108,8 @@ def test_fleet_lands_a_dag_with_rework(repo, tmp_path):
     assert len(log) == 5 and all(line.startswith("fleet(") for line in log[:4])
     assert log.index("fleet(C): task C") < log.index("fleet(A): task A")  # newest first
 
-    assert coord.tasks["B"].attempts == 2 and "verify_failed" in coord.tasks["B"].feedback[0]
+    assert coord.tasks["B"].attempts == 2 and "verify_failed before review" in coord.tasks["B"].feedback[0]
+    assert ("review", "B", 1) not in model.calls  # the broken attempt never reached a paid review
     assert coord.tasks["C"].attempts == 2 and "needs a docstring" in coord.tasks["C"].feedback[0]
     for rec in coord.tasks.values():
         assert rec.reviewer is not None and rec.reviewer != rec.author
@@ -118,6 +119,35 @@ def test_fleet_lands_a_dag_with_rework(repo, tmp_path):
     EventLog.verify(events)
     assert set(project_states(events).values()) == {"done"}
     assert git(repo, "worktree", "list").count("\n") == 0
+
+
+def test_without_verify_before_review_the_merge_queue_catches_it(repo, tmp_path):
+    plan = plan_of(spec("B", scope=["src/b.py"]))
+    model = ScriptedModel(broken_first={"B"})
+    coord, fleet, _ = build(repo, tmp_path, plan, model, verify_before_review=False)
+    report = fleet.run(timeout_s=60)
+    assert report.finished and coord.tasks["B"].state is TaskState.DONE, coord.summary()
+    assert ("review", "B", 1) in model.calls  # the broken attempt was reviewed (and paid for)
+    assert coord.tasks["B"].feedback[0].startswith("merge verify_failed")
+
+
+def test_budget_capped_review_blocks_after_one_retry(repo, tmp_path):
+    reviews: list[float] = []
+
+    def model(req: ExecRequest) -> ExecResult:
+        if req.prompt.startswith("REVIEW TASK"):
+            reviews.append(req.budget_usd)
+            return ExecResult(
+                ok=False, cost_usd=req.budget_usd, error="error_max_budget_usd: cap", budget_exhausted=True
+            )
+        (req.cwd / "src" / "a.py").write_text("A = 1\n")
+        return ExecResult(ok=True, cost_usd=0.1, structured={"status": "done", "summary": "ok", "blocker": ""})
+
+    coord, fleet, _ = build(repo, tmp_path, plan_of(spec("A", scope=["src/a.py"])), model)
+    report = fleet.run(timeout_s=60)
+    rec = coord.tasks["A"]
+    assert not report.finished and rec.state is TaskState.BLOCKED, coord.summary()
+    assert len(reviews) == 2 and "raise review_budget_usd" in rec.reason
 
 
 def test_blocked_worker_escalates_and_dependents_wait(repo, tmp_path):
@@ -145,7 +175,7 @@ def test_triage_condenses_long_feedback(repo, tmp_path):
         return ExecResult(ok=True, cost_usd=0.1, structured={"status": "done", "summary": "ok", "blocker": ""})
 
     plan = plan_of(spec("A", scope=["src/a.py"]))
-    conf = config(triage_threshold_chars=200)
+    conf = config(triage_threshold_chars=200, verify_command=())  # the repo fixture has no tests
     coord = Coordinator(plan, conf, SystemClock(), EventLog())
     first = coord.acquire(AgentInfo("w1", Role.WORKER))
     coord.fail("A", first.token, "pytest output: " + "E" * 5000)

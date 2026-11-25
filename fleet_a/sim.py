@@ -377,7 +377,7 @@ class Simulator:
                 )
         elif a.role is Role.REVIEWER:
             if rng.random() < cfg.p_review_error:
-                coord.fail(task_id, token, "sim reviewer error", cost_usd=cost)
+                coord.fail(task_id, token, "sim reviewer error", cost_usd=cost, budget_exhausted=rng.random() < 0.5)
             else:
                 coord.submit_review(task_id, token, ReviewVerdict(rng.random() >= cfg.p_reject, "sim", (), cost))
         else:
