@@ -95,14 +95,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("events", help="path to the events JSONL file")
     args = parser.parse_args(argv)
 
-    if not os.path.exists(args.events):
+    if not os.path.isfile(args.events):
         print("error: events file not found: %s" % args.events, file=sys.stderr)
         return 2
     try:
         events = EventLog.load(args.events)
         EventLog.verify(events)
-    except FleetError as exc:
-        print(str(exc), file=sys.stderr)
+    except OSError as exc:
+        print("error: cannot read %s: %s" % (args.events, exc), file=sys.stderr)
+        return 2
+    except (FleetError, TypeError) as exc:
+        # TypeError: a line that is valid JSON but not an object, which EventLog.load does not wrap.
+        print("error: %s: %s" % (args.events, exc), file=sys.stderr)
         return 1
     print(format_report(summarize(events)))
     return 0

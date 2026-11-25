@@ -6,6 +6,7 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from fleet_a import report
 from fleet_a.events import EventLog
@@ -202,6 +203,31 @@ class MainTests(unittest.TestCase):
             code, out, err = self.run_main(path)
         self.assertEqual(code, 1)
         self.assertTrue(err.strip())
+
+    def test_directory_is_not_found(self):
+        with tempfile.TemporaryDirectory() as d:
+            code, out, err = self.run_main(Path(d))
+        self.assertEqual(code, 2)
+        self.assertIn("not found", err)
+
+    def test_unreadable_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "events.jsonl"
+            write_log(path)
+            with mock.patch.object(report.EventLog, "load", side_effect=PermissionError("denied")):
+                code, out, err = self.run_main(path)
+        self.assertEqual(code, 2)
+        self.assertIn("cannot read", err)
+
+    def test_non_object_line(self):
+        for line in ("[]", "null", "5"):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                path = Path(d) / "events.jsonl"
+                path.write_text(line + "\n")
+                code, out, err = self.run_main(path)
+                self.assertEqual(code, 1)
+                self.assertEqual(out, "")
+                self.assertTrue(err.strip())
 
 
 if __name__ == "__main__":
