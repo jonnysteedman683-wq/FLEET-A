@@ -13,8 +13,9 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from .errors import GitError
+from .errors import FleetError, GitError
 from .git import Git
+from .model import is_ref_safe_id
 
 
 @dataclass(frozen=True)
@@ -33,9 +34,11 @@ class Workspaces:
     def create_worktree(
         self, run_id: str, task_id: str, attempt: int, token: int, target_branch: str
     ) -> Worktree:
+        if not is_ref_safe_id(run_id, max_len=128):
+            raise FleetError(f"worktree needs a valid run id, got {run_id!r}")
         base = self.git.rev_parse(f"refs/heads/{target_branch}")
         branch = f"fleet/{run_id}/{task_id}/a{attempt}-t{token}"
-        path = self.root / run_id / f"{task_id}-a{attempt}-t{token}"
+        path = self._inside_root(Path(run_id) / f"{task_id}-a{attempt}-t{token}")
         self._clear(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.git.run("worktree", "add", "-q", "-b", branch, str(path), base)
@@ -43,7 +46,7 @@ class Workspaces:
 
     def checkout_detached(self, commit: str, name: str, base: str | None = None) -> Worktree:
         """Check out ``commit`` at ``<root>/<name>``; callers put their run id in ``name``."""
-        path = self.root / name
+        path = self._inside_root(Path(name))
         self._clear(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.git.run("worktree", "add", "-q", "--detach", str(path), commit)
@@ -74,6 +77,18 @@ class Workspaces:
         if worktree.path.exists():
             shutil.rmtree(worktree.path, ignore_errors=True)
         self.git.run("worktree", "prune", check=False)
+
+    def _inside_root(self, rel: Path) -> Path:
+        """``<root>/<rel>``, refusing anything that would land outside the worktrees root.
+
+        An absolute ``rel`` (e.g. a name built from an empty run id, "/review-...") would replace
+        the root entirely under pathlib's join, and ``..`` would climb out of it; _clear then
+        deletes whatever is there, so both are rejected before any filesystem change.
+        """
+        path = (self.root / rel).resolve()
+        if rel.is_absolute() or path == self.root or self.root not in path.parents:
+            raise FleetError(f"worktree path {str(rel)!r} is outside the worktrees root")
+        return path
 
     def _clear(self, path: Path) -> None:
         if path.exists():

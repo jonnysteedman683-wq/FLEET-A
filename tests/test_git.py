@@ -9,6 +9,7 @@ import pytest
 
 from conftest import git, spec
 
+from fleet_a.errors import FleetError
 from fleet_a.git import Git
 from fleet_a.mergequeue import MergeQueue, fence_ref, landed_tasks
 from fleet_a.model import Assignment, MergeStatus, Role
@@ -56,6 +57,22 @@ def test_worktree_branch_naming_squash_and_cleanup(repo, tmp_path):
     ws.remove(wt)
     assert not wt.path.exists()
     assert git(repo, "rev-parse", f"fleet/{RUN}/T1/a2-t7") == commit
+
+
+def test_worktree_rejects_missing_run_id_and_escaping_names(repo, tmp_path):
+    g, ws, _ = setup(repo, tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("must survive\n")
+    for bad in ("", "a/b", "..", "x..y", "-x"):
+        with pytest.raises(FleetError, match="valid run id"):
+            ws.create_worktree(bad, "T1", 1, 1, "main")
+    head = git(repo, "rev-parse", "HEAD")
+    for name in ("/review-T1-a1-t1", "../outside", f"{outside}", "run/../../outside", "."):
+        with pytest.raises(FleetError, match="outside the worktrees root"):
+            ws.checkout_detached(head, name)
+    assert (outside / "keep.txt").read_text() == "must survive\n"
+    assert git(repo, "for-each-ref", "--format=%(refname)", "refs/heads/fleet") == ""
 
 
 def test_second_run_does_not_collide_with_first_runs_leftovers(repo, tmp_path):
