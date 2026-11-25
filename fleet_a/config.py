@@ -187,7 +187,11 @@ class FleetConfig:
             raise ConfigError("max_infra_retries must be >= 0")
         if self.aging_interval_s < 0:
             raise ConfigError("aging_interval_s must be >= 0")
-        if not math.isfinite(self.verify_timeout_s) or self.verify_timeout_s <= 0:
+        try:
+            timeout_ok = math.isfinite(self.verify_timeout_s) and self.verify_timeout_s > 0
+        except (OverflowError, TypeError):  # an int too large for a float, or not a number at all
+            timeout_ok = False
+        if not timeout_ok:
             raise ConfigError("verify_timeout_s must be a finite number > 0")
         if not isinstance(self.verify_before_review, bool):
             raise ConfigError("verify_before_review must be true or false")

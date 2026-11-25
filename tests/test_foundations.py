@@ -208,6 +208,8 @@ def test_config_from_dict_merges_and_validates():
         {"max_review_budget_retries": True},
         {"verify_timeout_s": float("nan")},
         {"verify_timeout_s": float("inf")},
+        {"verify_timeout_s": 10 ** 400},
+        {"verify_timeout_s": "60"},
         {"run_budget_usd": "1e40"},
         {"typo_budget": 1},
         {"max_concurrent": {"integrator": 2}},
