@@ -214,6 +214,11 @@ def _kill_group(proc: subprocess.Popen[str], grace_s: float = 5.0) -> None:
             break
         except subprocess.TimeoutExpired:
             continue
+    # The leader may have exited on SIGTERM while other members ignored it: reap the rest.
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
     try:
         proc.communicate(timeout=grace_s)
     except (subprocess.TimeoutExpired, ValueError):

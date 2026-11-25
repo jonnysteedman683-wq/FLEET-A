@@ -158,6 +158,35 @@ def test_run_verify_stops_on_cancel_and_timeout(tmp_path):
     assert run_verify([], 30, tmp_path)[0] is True
 
 
+def test_run_verify_kills_group_members_that_ignore_sigterm(tmp_path):
+    import os
+
+    from fleet_a.mergequeue import run_verify
+
+    pidfile = tmp_path / "grandchild.pid"
+    grandchild = (
+        "import os,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"open({str(pidfile)!r},'w').write(str(os.getpid())); time.sleep(60)"
+    )
+    # The leader dies on SIGTERM (default action) while the grandchild ignores it.
+    leader = (
+        "import subprocess,sys,time; "
+        f"subprocess.Popen([sys.executable,'-c',{grandchild!r}]); time.sleep(60)"
+    )
+    ok, out = run_verify([sys.executable, "-c", leader], 1.5, tmp_path)
+    assert not ok and "timed out" in out
+    pid = int(pidfile.read_text())
+    deadline = time.monotonic() + 5
+    alive = True
+    while alive and time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+            time.sleep(0.05)
+        except ProcessLookupError:
+            alive = False
+    assert not alive
+
+
 def test_without_verify_before_review_the_merge_queue_catches_it(repo, tmp_path):
     plan = plan_of(spec("B", scope=["src/b.py"]))
     model = ScriptedModel(broken_first={"B"})
