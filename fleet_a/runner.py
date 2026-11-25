@@ -16,7 +16,7 @@ from .config import FleetConfig
 from .coordinator import Coordinator
 from .errors import FleetError, StaleLease
 from .executors import ExecRequest, Executor
-from .mergequeue import MergeQueue
+from .mergequeue import MergeQueue, run_verify
 from .model import AgentInfo, Assignment, ReviewVerdict, Role, WorkResult, micros_to_usd
 from .prompts import (
     REVIEW_SCHEMA,
@@ -183,6 +183,14 @@ class AgentRunner:
             if commit is None:
                 self.coord.fail(a.task.id, a.token, "attempt produced no changes", cost_usd=cost)
                 return
+            if self.config.verify_before_review:
+                passed, output = run_verify(self.config.verify_command, self.config.verify_timeout_s, worktree.path)
+                if lost.is_set():
+                    return
+                if not passed:
+                    # Rework with the test output; the merge queue verifies again on the rebased tree.
+                    self.coord.fail(a.task.id, a.token, f"verify_failed before review: {output}", cost_usd=cost)
+                    return
             self.coord.submit_work(
                 a.task.id,
                 a.token,
@@ -229,7 +237,14 @@ class AgentRunner:
             if lost.is_set():
                 return
             if not result.ok or result.structured is None:
-                self.coord.fail(a.task.id, a.token, f"review session failed: {result.error}", cost_usd=cost, retryable=result.retryable)
+                self.coord.fail(
+                    a.task.id,
+                    a.token,
+                    f"review session failed: {result.error}",
+                    cost_usd=cost,
+                    retryable=result.retryable,
+                    budget_exhausted=result.budget_exhausted,
+                )
                 return
             self.coord.submit_review(a.task.id, a.token, parse_review(result.structured, cost))
         except StaleLease:

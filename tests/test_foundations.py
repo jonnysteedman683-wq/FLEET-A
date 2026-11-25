@@ -197,7 +197,13 @@ def test_config_from_dict_merges_and_validates():
     assert cfg.lease_ttl_s[Role.WORKER] == 120 and cfg.lease_ttl_s[Role.REVIEWER] == 600
     assert cfg.models["worker"].effort == "high" and cfg.models["worker"].model == "claude-sonnet-5-5"
     assert cfg.verify_command == ("make", "test")
+    assert cfg.verify_before_review is True and cfg.max_review_budget_retries == 1
+    tuned = FleetConfig.from_dict({"verify_before_review": False, "max_review_budget_retries": 0})
+    assert tuned.verify_before_review is False and tuned.max_review_budget_retries == 0
     for bad in (
+        {"verify_before_review": "false"},
+        {"max_review_budget_retries": -1},
+        {"max_review_budget_retries": True},
         {"typo_budget": 1},
         {"max_concurrent": {"integrator": 2}},
         {"models": {"worker": {"permission_mode": "bypassPermissions"}}},

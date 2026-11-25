@@ -219,6 +219,32 @@ def test_reviewer_infra_retries_then_blocks():
     assert coord.resume("a") is S.AWAITING_REVIEW
 
 
+def test_budget_capped_review_retries_once_then_blocks():
+    coord, _ = make(spec("a"), max_infra_retries=5, max_review_budget_retries=1)
+    a = coord.acquire(W1)
+    coord.submit_work("a", a.token, work("a"))
+    r = coord.acquire(R1)
+    coord.fail("a", r.token, "review session failed: error_max_budget_usd", cost_usd=0.5, budget_exhausted=True)
+    rec = coord.tasks["a"]
+    assert rec.state is S.AWAITING_REVIEW and rec.review_budget_hits == 1
+    r = coord.acquire(R1)
+    coord.fail("a", r.token, "review session failed: error_max_budget_usd", cost_usd=0.5, budget_exhausted=True)
+    assert rec.state is S.BLOCKED and "raise review_budget_usd" in rec.reason
+    assert rec.infra_failures == 0 and coord.scopes.holds("a")
+    assert coord.resume("a") is S.AWAITING_REVIEW and rec.review_budget_hits == 0
+    r = coord.acquire(R1)
+    coord.fail("a", r.token, "api 529")  # an ordinary infra error still takes the infra path
+    assert rec.state is S.AWAITING_REVIEW and rec.infra_failures == 1 and rec.review_budget_hits == 0
+
+
+def test_budget_capped_worker_is_ordinary_rework():
+    coord, _ = make(spec("a", max_attempts=3), max_review_budget_retries=0)
+    a = coord.acquire(W1)
+    coord.fail("a", a.token, "worker session failed: error_max_budget_usd", cost_usd=0.5, budget_exhausted=True)
+    rec = coord.tasks["a"]
+    assert rec.state is S.READY and rec.review_budget_hits == 0 and len(rec.feedback) == 1
+
+
 def test_task_budget_exhaustion_blocks_and_resume_with_budget():
     coord, _ = make(spec("a", attempt_budget=usd_to_micros("2"), budget=usd_to_micros("2"), max_attempts=3))
     a = coord.acquire(W1)

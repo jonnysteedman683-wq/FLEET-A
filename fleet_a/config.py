@@ -150,6 +150,12 @@ class FleetConfig:
     aging_interval_s: float = 600.0
     verify_command: tuple[str, ...] = ("python3", "-m", "pytest", "-q")
     verify_timeout_s: float = 1200.0
+    # Run verify_command in the worker's worktree before review: a failing attempt goes straight
+    # back to rework with the test output, and no paid review is spent on it.
+    verify_before_review: bool = True
+    # A review that hits review_budget is retried this many times, then the task is BLOCKED for
+    # the operator to raise review_budget_usd: each retry at the same cap can spend all of it again.
+    max_review_budget_retries: int = 1
     agents: tuple[AgentPool, ...] = DEFAULT_AGENTS
     models: Mapping[str, ModelProfile] = field(default_factory=lambda: dict(DEFAULT_MODELS))
     git_name: str = "FLEET-A"
@@ -179,6 +185,14 @@ class FleetConfig:
             raise ConfigError("aging_interval_s must be >= 0")
         if self.verify_timeout_s <= 0:
             raise ConfigError("verify_timeout_s must be > 0")
+        if not isinstance(self.verify_before_review, bool):
+            raise ConfigError("verify_before_review must be true or false")
+        if (
+            isinstance(self.max_review_budget_retries, bool)
+            or not isinstance(self.max_review_budget_retries, int)
+            or self.max_review_budget_retries < 0
+        ):
+            raise ConfigError("max_review_budget_retries must be an integer >= 0")
         if self.triage_threshold_chars < 200:
             raise ConfigError("triage_threshold_chars must be >= 200")
         missing = [p for p in PROFILE_NAMES if p not in self.models]
@@ -210,6 +224,8 @@ class FleetConfig:
             "max_infra_retries",
             "aging_interval_s",
             "verify_timeout_s",
+            "verify_before_review",
+            "max_review_budget_retries",
             "git_name",
             "git_email",
             "poll_interval_s",

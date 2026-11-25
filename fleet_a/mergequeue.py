@@ -157,22 +157,26 @@ class MergeQueue:
 
 
     def verify(self, path: Path) -> tuple[bool, str]:
-        if not self.verify_command:
-            return True, "no verify command configured"
-        try:
-            proc = subprocess.run(
-                list(self.verify_command),
-                cwd=str(path),
-                capture_output=True,
-                text=True,
-                timeout=self.verify_timeout_s,
-            )
-        except subprocess.TimeoutExpired:
-            return False, f"verify command timed out after {self.verify_timeout_s:.0f}s"
-        except OSError as exc:
-            return False, f"verify command could not start: {exc}"
-        output = _tail(proc.stdout + "\n" + proc.stderr)
-        return proc.returncode == 0, output
+        return run_verify(self.verify_command, self.verify_timeout_s, path)
+
+
+def run_verify(command: Sequence[str], timeout_s: float, path: Path) -> tuple[bool, str]:
+    """Run the verify command in ``path``: (passed, tail of its output). No command always passes."""
+    if not command:
+        return True, "no verify command configured"
+    try:
+        proc = subprocess.run(
+            list(command),
+            cwd=str(path),
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"verify command timed out after {timeout_s:.0f}s"
+    except OSError as exc:
+        return False, f"verify command could not start: {exc}"
+    return proc.returncode == 0, _tail(proc.stdout + "\n" + proc.stderr)
 
 
 def landed_tasks(git: Git, target_ref: str, run_id: str) -> dict[str, dict[str, object]]:

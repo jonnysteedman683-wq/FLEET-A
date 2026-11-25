@@ -107,6 +107,7 @@ def test_result_parsing(fake, tmp_path, monkeypatch, mode, ok, cost, error):
     assert result.ok is ok and result.cost_usd == cost
     if error:
         assert error in result.error
+    assert result.budget_exhausted is (mode == "error")  # only the error_max_budget_usd subtype
 
 
 def test_timeout_kills_and_charges_full_budget(fake, tmp_path, monkeypatch):

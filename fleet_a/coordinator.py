@@ -95,6 +95,7 @@ class TaskRecord:
     state_since: float = 0.0
     attempts: int = 0
     infra_failures: int = 0
+    review_budget_hits: int = 0
     author: str | None = None
     reviewer: str | None = None
     branch: str | None = None
@@ -286,8 +287,13 @@ class Coordinator:
         cost_usd: float = 0.0,
         retryable: bool = True,
         escalate: bool = False,
+        budget_exhausted: bool = False,
     ) -> None:
-        """Report that the current phase could not complete."""
+        """Report that the current phase could not complete.
+
+        ``budget_exhausted`` marks a session stopped at its spending cap. For a review it is
+        retried at most ``max_review_budget_retries`` times before the task is BLOCKED.
+        """
         with self._lock:
             now = self.clock.now()
             self._sweep(now)
@@ -306,6 +312,8 @@ class Coordinator:
                     self._rework(rec, now, reason)
                 else:
                     self._transition(rec, S.FAILED, now, f"non-retryable: {reason}")
+            elif retryable and budget_exhausted and lease.role is Role.REVIEWER:
+                self._review_budget_retry(rec, now, back, reason)
             elif retryable:
                 self._infra_retry(rec, now, back, reason)
             else:
@@ -389,6 +397,7 @@ class Coordinator:
             if note:
                 rec.feedback.append(f"operator: {note}")
             rec.infra_failures = 0
+            rec.review_budget_hits = 0
             rec.resume_to = None
             self._transition(
                 rec,
@@ -623,6 +632,21 @@ class Coordinator:
             self._transition(rec, S.BLOCKED, now, f"infrastructure retries exhausted: {reason}")
         else:
             self._transition(rec, back, now, f"retry: {reason}")
+
+    def _review_budget_retry(self, rec: TaskRecord, now: float, back: TaskState, reason: str) -> None:
+        rec.review_budget_hits += 1
+        if rec.review_budget_hits > self.config.max_review_budget_retries:
+            rec.resume_to = back
+            cap = micros_to_usd(self.config.review_budget)
+            self._transition(
+                rec,
+                S.BLOCKED,
+                now,
+                f"review hit its ${cap} budget cap {rec.review_budget_hits} time(s); "
+                f"raise review_budget_usd and resume: {reason}",
+            )
+        else:
+            self._transition(rec, back, now, f"retry after review budget cap: {reason}")
 
     def _cancel(self, rec: TaskRecord, now: float, reason: str) -> bool:
         if rec.state in TERMINAL_STATES:
