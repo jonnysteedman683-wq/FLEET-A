@@ -229,6 +229,35 @@ def test_integrate_verify_honors_cancel(repo, tmp_path):
     assert g.rev_parse("refs/heads/main") == before
 
 
+def test_integrate_never_lands_once_cancelled(repo, tmp_path, monkeypatch):
+    import threading
+
+    g = Git(repo)
+    ws = Workspaces(g, tmp_path / "wt")
+    marker = tmp_path / "verify-ran"
+    mq = MergeQueue(g, ws, "main", [sys.executable, "-c", f"open({str(marker)!r}, 'w').close()"], 30)
+    before = g.rev_parse("refs/heads/main")
+
+    # Lost before verify: the command never runs and nothing lands.
+    lost = threading.Event()
+    lost.set()
+    out = mq.integrate(RUN, "T", 1, 5, attempt(ws, "T", 1, 1, {"src/t.py": "T = 1\n"}), ("src/",), cancel=lost)
+    assert out.status is MergeStatus.VERIFY_FAILED and "cancelled" in out.detail
+    assert not marker.exists() and g.rev_parse("refs/heads/main") == before
+
+    # Lost while a passing verify runs: still nothing lands.
+    lost = threading.Event()
+
+    def passes_then_lose_lease(path, cancel=None):
+        lost.set()
+        return True, "ok"
+
+    monkeypatch.setattr(mq, "verify", passes_then_lose_lease)
+    out = mq.integrate(RUN, "U", 1, 6, attempt(ws, "U", 1, 1, {"src/u.py": "U = 1\n"}), ("src/",), cancel=lost)
+    assert out.status is MergeStatus.VERIFY_FAILED and "not landing" in out.detail
+    assert g.rev_parse("refs/heads/main") == before
+
+
 def test_verify_timeout(repo, tmp_path):
     g = Git(repo)
     ws = Workspaces(g, tmp_path / "wt")

@@ -97,9 +97,15 @@ class MergeQueue:
             outside = scope_violations(list(write_scope), changed)
             if outside:
                 return MergeOutcome(MergeStatus.SCOPE_VIOLATION, detail=f"outside write scope: {outside}")
+            if cancel is not None and cancel.is_set():
+                return MergeOutcome(MergeStatus.VERIFY_FAILED, detail="verify command cancelled: lease lost")
             ok, output = self.verify(scratch.path) if cancel is None else self.verify(scratch.path, cancel=cancel)
             if not ok:
                 return MergeOutcome(MergeStatus.VERIFY_FAILED, detail=output)
+            if cancel is not None and cancel.is_set():
+                # Lost during a passing verify: don't land. (A stale landing would still be safe,
+                # since the fence and find_landed reconcile it, but there is no reason to try.)
+                return MergeOutcome(MergeStatus.VERIFY_FAILED, detail="lease lost after verify; not landing")
             ref = fence_ref(run_id, task_id)
             land = self.git.run(
                 "update-ref",

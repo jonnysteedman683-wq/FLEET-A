@@ -16,7 +16,7 @@ from fleet_a.events import EventLog, project_states
 from fleet_a.executors import CallableExecutor, ExecRequest, ExecResult
 from fleet_a.git import Git
 from fleet_a.mergequeue import MergeQueue
-from fleet_a.model import AgentInfo, Role, TaskState, usd_to_micros
+from fleet_a.model import AgentInfo, MergeOutcome, MergeStatus, Role, TaskState, usd_to_micros
 from fleet_a.runner import AgentRunner, Fleet, clip_feedback, parse_review
 from fleet_a.workspaces import Workspaces
 
@@ -176,15 +176,51 @@ def test_run_verify_kills_group_members_that_ignore_sigterm(tmp_path):
     ok, out = run_verify([sys.executable, "-c", leader], 1.5, tmp_path)
     assert not ok and "timed out" in out
     pid = int(pidfile.read_text())
-    deadline = time.monotonic() + 5
-    alive = True
-    while alive and time.monotonic() < deadline:
+
+    def running(pid: int) -> bool:
         try:
             os.kill(pid, 0)
-            time.sleep(0.05)
         except ProcessLookupError:
-            alive = False
-    assert not alive
+            return False
+        try:  # a zombie has exited; only its parent (or PID 1) has not reaped it yet
+            return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        except (OSError, IndexError):
+            return True
+
+    deadline = time.monotonic() + 5
+    while running(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not running(pid)
+
+
+def test_integrator_passes_its_lease_loss_event_to_the_merge_queue(repo, tmp_path):
+    """The integrator's heartbeat event reaches integrate(); once it is set, nothing is reported."""
+    from fleet_a.coordinator import ManualClock
+
+    plan = plan_of(spec("A", scope=["src/a.py"]))
+    conf = config(verify_command=(), lease_ttl_s={Role.WORKER: 30.0, Role.REVIEWER: 30.0, Role.INTEGRATOR: 0.3})
+    clock = ManualClock()
+    coord = Coordinator(plan, conf, clock, EventLog())
+    ws = Workspaces(Git(repo), tmp_path / "wt")
+    for agent in (AgentInfo("w1", Role.WORKER), AgentInfo("r1", Role.REVIEWER)):
+        runner = AgentRunner(coord, agent, conf, executor=CallableExecutor(ScriptedModel()), workspaces=ws)
+        assert runner.step()
+    assert coord.tasks["A"].state is TaskState.AWAITING_MERGE
+
+    seen = {}
+
+    class LosesLease:
+        def integrate(self, *args, cancel=None):
+            seen["cancel"] = cancel
+            clock.advance(60)  # the lease expires; the next heartbeat is refused and sets the event
+            cancel.wait(5)
+            return MergeOutcome(MergeStatus.VERIFY_FAILED, detail="verify command cancelled: lease lost")
+
+    integrator = AgentRunner(coord, AgentInfo("i1", Role.INTEGRATOR), conf, merge_queue=LosesLease())
+    assert integrator.step()
+    assert isinstance(seen["cancel"], threading.Event) and seen["cancel"].is_set()
+    assert not any(e.kind == "stale_rejected" for e in coord.events.events)  # nothing was reported
+    assert coord.tasks["A"].merge_unresolved  # the next integrator reconciles through the fence
 
 
 def test_without_verify_before_review_the_merge_queue_catches_it(repo, tmp_path):
