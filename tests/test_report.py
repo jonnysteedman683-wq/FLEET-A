@@ -159,6 +159,29 @@ class FormatTests(unittest.TestCase):
         text = report.format_report(report.summarize([]))
         self.assertEqual(len(text.split("\n")), 1)
         self.assertIn("$0.0000", text)
+        self.assertIn("finished 0/0", text)
+
+    def test_finished_count(self):
+        self.assertIn("finished 2/2", report.format_report(report.summarize(clean_log().events)).split("\n")[0])
+        log = EventLog()
+        add_plan(log, 100.0)
+        add_transition(log, "t1", "pending", "running", 1, 101.0)
+        add_transition(log, "t1", "running", "done", 1, 102.0, commit="abc")
+        add_transition(log, "t2", "pending", "running", 1, 103.0)
+        self.assertIn("finished 1/2", report.format_report(report.summarize(log.events)).split("\n")[0])
+
+    def test_control_characters_escaped(self):
+        summary = {
+            "run": "r\x1b]0;x\x07",
+            "duration_s": 0.0,
+            "total_usd": 0.0,
+            "tasks": {"t1\x1b[31m": {"state": "done\x1b[0m", "attempts": 1, "spend_usd": 0.0}},
+        }
+        text = report.format_report(summary)
+        self.assertNotIn("\x1b", text)
+        self.assertNotIn("\x07", text)
+        self.assertIn("r\\x1b]0;x\\x07", text)
+        self.assertIn("t1\\x1b[31m", text)
 
 
 def write_log(path):
@@ -218,6 +241,18 @@ class MainTests(unittest.TestCase):
                 code, out, err = self.run_main(path)
         self.assertEqual(code, 2)
         self.assertIn("cannot read", err)
+
+    def test_inconsistent_transition(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "events.jsonl"
+            log = EventLog(path)
+            add_plan(log, 100.0)
+            add_transition(log, "t1", "running", "done", 1, 101.0, commit="abc")
+            log.close()
+            code, out, err = self.run_main(path)
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("projected state", err)
 
     def test_non_object_line(self):
         for line in ("[]", "null", "5"):

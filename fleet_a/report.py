@@ -1,6 +1,12 @@
 """Run report for FLEET-A: summarize one run's event log.
 
 Usage: python3 -m fleet_a.report EVENTS.jsonl
+
+Before reporting, the CLI checks the log's hash chain and replays its task states. The chain
+detects corruption, truncation, reordering and any edit that does not recompute the hashes; it is
+unkeyed, so it does not prove who wrote the log. Tasks are listed in the order the plan event
+records them, which is the plan's dependency (topological) order. A log that is still being written
+is reported as it stands; the header's "finished" count shows how many tasks have ended.
 """
 from __future__ import annotations
 
@@ -9,12 +15,20 @@ import os
 import sys
 from typing import Any, Optional, Sequence
 
-from .events import Event, EventLog
+from .events import Event, EventLog, project_states
 from .errors import FleetError
+
+FINISHED_STATES = frozenset({"done", "failed", "cancelled"})
+
+
+def _printable(value: Any) -> str:
+    """Log text with control characters escaped, so a crafted log cannot drive the terminal."""
+    text = str(value)
+    return "".join(c if c.isprintable() else c.encode("unicode_escape").decode("ascii") for c in text)
 
 
 def summarize(events: Sequence[Event]) -> dict:
-    """Fold an event sequence into a per-run summary dict."""
+    """Fold an event sequence into a per-run summary dict, tasks in the plan event's order."""
     run = None
     plan = None
     tasks: dict[str, dict[str, Any]] = {}
@@ -74,16 +88,24 @@ def summarize(events: Sequence[Event]) -> dict:
 def format_report(summary: dict) -> str:
     """Render a summary as a header line plus one line per task."""
     run = summary.get("run")
-    run_text = "-" if run is None else str(run)
+    run_text = "-" if run is None else _printable(run)
     duration = float(summary.get("duration_s") or 0.0)
     total = float(summary.get("total_usd") or 0.0)
+    tasks = summary.get("tasks") or {}
+    finished = sum(1 for rec in tasks.values() if rec.get("state") in FINISHED_STATES)
     lines = [
-        "run %s  duration %ss  total $%.4f" % (run_text, round(duration, 3), total)
+        "run %s  duration %ss  total $%.4f  finished %d/%d"
+        % (run_text, round(duration, 3), total, finished, len(tasks))
     ]
-    for tid, rec in (summary.get("tasks") or {}).items():
+    for tid, rec in tasks.items():
         lines.append(
             "%s  %s  attempts=%s  $%.4f"
-            % (tid, rec.get("state"), rec.get("attempts"), float(rec.get("spend_usd") or 0.0))
+            % (
+                _printable(tid),
+                _printable(rec.get("state")),
+                _printable(rec.get("attempts")),
+                float(rec.get("spend_usd") or 0.0),
+            )
         )
     return "\n".join(lines)
 
@@ -101,6 +123,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         events = EventLog.load(args.events)
         EventLog.verify(events)
+        project_states(events)  # a well-hashed log can still hold a transition from the wrong state
     except OSError as exc:
         print("error: cannot read %s: %s" % (args.events, exc), file=sys.stderr)
         return 2
