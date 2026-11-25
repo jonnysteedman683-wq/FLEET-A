@@ -211,6 +211,7 @@ def test_config_from_dict_merges_and_validates():
         {"verify_timeout_s": 10 ** 400},
         {"verify_timeout_s": "60"},
         {"run_budget_usd": "1e40"},
+        {"run_budget_usd": "1e999999"},
         {"typo_budget": 1},
         {"max_concurrent": {"integrator": 2}},
         {"models": {"worker": {"permission_mode": "bypassPermissions"}}},
