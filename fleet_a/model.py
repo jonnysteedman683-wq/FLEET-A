@@ -31,7 +31,10 @@ def usd_to_micros(value: object) -> int:
         raise ValueError(f"not a dollar amount: {value!r}") from exc
     if not amount.is_finite() or amount < 0:
         raise ValueError(f"dollar amount must be finite and >= 0: {value!r}")
-    return int((amount * MICROS_PER_USD).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    try:
+        return int((amount * MICROS_PER_USD).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    except InvalidOperation as exc:  # too many digits for the decimal context
+        raise ValueError(f"dollar amount too large: {value!r}") from exc
 
 
 def micros_to_usd(micros: int) -> float:

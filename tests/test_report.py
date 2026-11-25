@@ -356,6 +356,14 @@ class MainTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             report.summarize(log.events)
 
+    def test_summarize_rejects_a_total_that_overflows(self):
+        log = EventLog()
+        add_plan(log, 1.0)
+        log.append("spend", "t1", {"charged_usd": 1e308}, 2.0)
+        log.append("spend", "t1", {"charged_usd": 1e308}, 3.0)
+        with self.assertRaises(ValueError):
+            report.summarize(log.events)
+
     def test_number_rejects_non_finite_and_oversized(self):
         for bad in (float("nan"), float("inf"), -float("inf"), 10 ** 400, True, "1", None):
             with self.subTest(bad=bad), self.assertRaises(ValueError):

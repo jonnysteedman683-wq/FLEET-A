@@ -84,6 +84,8 @@ def summarize(events: Sequence[Event]) -> dict:
         if ev.kind == "spend":
             amount = _number(data.get("charged_usd", 0.0), "charged_usd")  # null, false, "" are malformed
             total += amount
+            if not math.isfinite(total):
+                raise ValueError("malformed charged_usd: the total spend overflows")
             rec = tasks.get(ev.task) if ev.task is not None else None
             if rec is not None:
                 rec["spend_usd"] += amount
