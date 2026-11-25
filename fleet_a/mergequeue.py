@@ -73,6 +73,8 @@ class MergeQueue:
         token: int,
         commit: str,
         write_scope: Iterable[str],
+        *,
+        cancel: threading.Event | None = None,
     ) -> MergeOutcome:
         fence = self.claim_fence(run_id, task_id, token)
         if fence is None:
@@ -95,7 +97,7 @@ class MergeQueue:
             outside = scope_violations(list(write_scope), changed)
             if outside:
                 return MergeOutcome(MergeStatus.SCOPE_VIOLATION, detail=f"outside write scope: {outside}")
-            ok, output = self.verify(scratch.path)
+            ok, output = self.verify(scratch.path) if cancel is None else self.verify(scratch.path, cancel=cancel)
             if not ok:
                 return MergeOutcome(MergeStatus.VERIFY_FAILED, detail=output)
             ref = fence_ref(run_id, task_id)
@@ -160,8 +162,8 @@ class MergeQueue:
         return landed_tasks(self.git, self.target_ref, run_id)
 
 
-    def verify(self, path: Path) -> tuple[bool, str]:
-        return run_verify(self.verify_command, self.verify_timeout_s, path)
+    def verify(self, path: Path, *, cancel: threading.Event | None = None) -> tuple[bool, str]:
+        return run_verify(self.verify_command, self.verify_timeout_s, path, cancel)
 
 
 def run_verify(

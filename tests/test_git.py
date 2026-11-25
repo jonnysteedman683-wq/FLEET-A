@@ -211,6 +211,24 @@ def test_verify_edge_cases(repo, tmp_path, cmd, ok, text):
     assert mq.verify(repo)[0] is ok and text in mq.verify(repo)[1]
 
 
+def test_integrate_verify_honors_cancel(repo, tmp_path):
+    import threading
+    import time
+
+    g = Git(repo)
+    ws = Workspaces(g, tmp_path / "wt")
+    mq = MergeQueue(g, ws, "main", [sys.executable, "-c", "import time; time.sleep(30)"], 30)
+    c = attempt(ws, "T", 1, 1, {"src/t.py": "T = 1\n"})
+    before = g.rev_parse("refs/heads/main")
+    evt = threading.Event()
+    threading.Timer(0.5, evt.set).start()
+    start = time.monotonic()
+    out = mq.integrate(RUN, "T", 1, 5, c, ("src/",), cancel=evt)
+    assert time.monotonic() - start < 10
+    assert out.status is MergeStatus.VERIFY_FAILED and "cancelled" in out.detail
+    assert g.rev_parse("refs/heads/main") == before
+
+
 def test_verify_timeout(repo, tmp_path):
     g = Git(repo)
     ws = Workspaces(g, tmp_path / "wt")
