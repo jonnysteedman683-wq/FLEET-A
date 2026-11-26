@@ -15,7 +15,16 @@ class Git:
         self.name = name
         self.email = email
         self.timeout_s = timeout_s
-        self._env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C", "GIT_EDITOR": "true"}
+        self._env = {
+            **os.environ,
+            "GIT_TERMINAL_PROMPT": "0",
+            "LC_ALL": "C",
+            "GIT_EDITOR": "true",
+            # refs/replace and info/grafts are shared with worker worktrees and would let one swap
+            # the content or parents of a reviewed commit: read every object as it really is.
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_GRAFT_FILE": os.devnull,
+        }
 
     def run(
         self,

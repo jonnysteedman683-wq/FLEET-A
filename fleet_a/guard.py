@@ -23,7 +23,7 @@ from pathlib import Path
 from .git import Git
 
 # Files in the common git directory that change which programs git runs or which objects it sees.
-_WATCHED_FILES = ("config", "info/attributes", "objects/info/alternates")
+_WATCHED_FILES = ("config", "info/attributes", "info/grafts", "objects/info/alternates")
 
 
 def _digest(path: Path) -> str | None:
@@ -42,6 +42,7 @@ class RepoGuard:
         self.lock = threading.RLock()
         self._files = self._snapshot_files()
         self._hooks = self._snapshot_hooks()
+        self._replace = self._snapshot_replace()
         self._tip = git.ref_oid(self.target_ref)
 
     @property
@@ -56,6 +57,9 @@ class RepoGuard:
         if not hooks.is_dir():
             return {}
         return {p.name: _digest(p) for p in sorted(hooks.iterdir()) if p.is_file() or p.is_symlink()}
+
+    def _snapshot_replace(self) -> str:
+        return self.git.run("for-each-ref", "--format=%(refname) %(objectname)", "refs/replace/").stdout
 
     def check(self) -> str | None:
         """Describe every change made outside the integrator since the snapshot, or None."""
@@ -72,6 +76,8 @@ class RepoGuard:
             for name in sorted(set(hooks) | set(self._hooks)):
                 if hooks.get(name) != self._hooks.get(name):
                     problems.append(f"hook {name} added, changed or removed")
+            if self._snapshot_replace() != self._replace:
+                problems.append("refs/replace changed")
             if not problems:
                 return None
             return "shared repository changed outside the integrator: " + "; ".join(problems)
