@@ -276,6 +276,9 @@ class Coordinator:
             elif status is MergeStatus.SCOPE_VIOLATION:
                 rec.resume_to = S.READY
                 self._transition(rec, S.BLOCKED, now, f"scope violation at merge: {outcome.detail}")
+            elif status is MergeStatus.TAMPERED:
+                rec.resume_to = S.AWAITING_MERGE
+                self._transition(rec, S.BLOCKED, now, f"merge refused, repository tampered: {outcome.detail}")
             else:
                 raise FleetError(f"unhandled merge status {status}")
 

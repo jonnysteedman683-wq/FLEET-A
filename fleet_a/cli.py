@@ -20,6 +20,7 @@ from .errors import FleetError
 from .events import EventLog, project_states
 from .executors import ClaudeCodeExecutor
 from .git import Git
+from .guard import RepoGuard
 from .mergequeue import MergeQueue, landed_tasks
 from .model import AgentInfo, Plan, Role, TaskState, format_usd, micros_to_usd
 from .planner import plan_goal
@@ -102,7 +103,10 @@ def build_fleet(
     git = Git(repo, name=config.git_name, email=config.git_email)
     git.rev_parse(f"refs/heads/{config.target_branch}")
     workspaces = Workspaces(git, worktrees)
-    merge_queue = MergeQueue(git, workspaces, config.target_branch, config.verify_command, config.verify_timeout_s)
+    guard = RepoGuard(git, config.target_branch)
+    merge_queue = MergeQueue(
+        git, workspaces, config.target_branch, config.verify_command, config.verify_timeout_s, guard=guard
+    )
     executor = ClaudeCodeExecutor(claude_binary)
     coordinator = Coordinator(plan, config, SystemClock(), EventLog(events_path, fsync=True))
     runners = []
@@ -118,6 +122,7 @@ def build_fleet(
                     triage_executor=executor if pool.role is Role.WORKER else None,
                     workspaces=workspaces,
                     merge_queue=merge_queue if pool.role is Role.INTEGRATOR else None,
+                    guard=guard,
                 )
             )
     return coordinator, Fleet(coordinator, runners, config.poll_interval_s)

@@ -31,6 +31,10 @@ class Git:
             "-c", f"user.email={self.email}",
             "-c", "commit.gpgsign=false",
             "-c", "core.quotePath=false",
+            # Worker sessions share this repository's hooks and config through their worktrees.
+            # Never run a hook or an fsmonitor program one of them may have planted.
+            "-c", "core.hooksPath=/dev/null",
+            "-c", "core.fsmonitor=false",
             *args,
         ]
         try:
