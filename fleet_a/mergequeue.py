@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from .git import Git
+from .guard import RepoGuard
 from .model import MergeOutcome, MergeStatus
 from .scopes import scope_violations
 from .workspaces import Workspaces
@@ -56,7 +57,9 @@ class MergeQueue:
         target_branch: str,
         verify_command: Sequence[str],
         verify_timeout_s: float,
+        guard: RepoGuard | None = None,
     ) -> None:
+        self.guard = guard
         self.git = git
         self.workspaces = workspaces
         self.target_ref = f"refs/heads/{target_branch}"
@@ -76,6 +79,10 @@ class MergeQueue:
         *,
         cancel: threading.Event | None = None,
     ) -> MergeOutcome:
+        if self.guard is not None:
+            problem = self.guard.check()
+            if problem is not None:
+                return MergeOutcome(MergeStatus.TAMPERED, detail=problem)
         fence = self.claim_fence(run_id, task_id, token)
         if fence is None:
             return MergeOutcome(MergeStatus.FENCED, detail=f"a newer lease than {token} owns the merge fence")
@@ -107,12 +114,9 @@ class MergeQueue:
                 # since the fence and find_landed reconcile it, but there is no reason to try.)
                 return MergeOutcome(MergeStatus.VERIFY_FAILED, detail="lease lost after verify; not landing")
             ref = fence_ref(run_id, task_id)
-            land = self.git.run(
-                "update-ref",
-                "--stdin",
-                input=f"verify {ref} {fence}\nupdate {self.target_ref} {head} {base}\n",
-                check=False,
-            )
+            land = self._land(ref, fence, head, base)
+            if isinstance(land, MergeOutcome):
+                return land
             if land.returncode != 0:
                 if self.git.ref_oid(ref) != fence:
                     return MergeOutcome(MergeStatus.FENCED, detail="fence moved before landing")
@@ -120,6 +124,23 @@ class MergeQueue:
             return MergeOutcome(MergeStatus.MERGED, head, f"landed on {self.target_ref}")
         finally:
             self.workspaces.remove(scratch)
+
+    def _land(self, ref: str, fence: str, head: str, base: str) -> subprocess.CompletedProcess[str] | MergeOutcome:
+        """The atomic update-ref; with a guard, checked and recorded under the guard's lock."""
+        stdin = f"verify {ref} {fence}\nupdate {self.target_ref} {head} {base}\n"
+        if self.guard is None:
+            return self.git.run("update-ref", "--stdin", input=stdin, check=False)
+        with self.guard.lock:
+            problem = self.guard.check()
+            if problem is not None:
+                return MergeOutcome(MergeStatus.TAMPERED, detail=problem)
+            if base != self.guard.expected_tip:
+                # Another integrator landed after this one read the target: an ordinary race.
+                return MergeOutcome(MergeStatus.TARGET_MOVED, detail="target moved since the rebase")
+            land = self.git.run("update-ref", "--stdin", input=stdin, check=False)
+            if land.returncode == 0:
+                self.guard.landed(base, head)
+            return land
 
     def claim_fence(self, run_id: str, task_id: str, token: int) -> str | None:
         """Move the fence to ``token`` unless a higher token already holds it. Returns its oid."""

@@ -16,6 +16,7 @@ from .config import FleetConfig
 from .coordinator import Coordinator
 from .errors import FleetError, StaleLease
 from .executors import ExecRequest, Executor
+from .guard import RepoGuard
 from .mergequeue import MergeQueue, run_verify
 from .model import AgentInfo, Assignment, ReviewVerdict, Role, WorkResult, micros_to_usd
 from .prompts import (
@@ -108,6 +109,7 @@ class AgentRunner:
         triage_executor: Executor | None = None,
         workspaces: Workspaces | None = None,
         merge_queue: MergeQueue | None = None,
+        guard: RepoGuard | None = None,
     ) -> None:
         if agent.role in (Role.WORKER, Role.REVIEWER) and (executor is None or workspaces is None):
             raise FleetError(f"{agent.role.value} runner needs an executor and workspaces")
@@ -122,6 +124,7 @@ class AgentRunner:
         self.triage_executor = triage_executor
         self.workspaces = workspaces
         self.merge_queue = merge_queue
+        self.guard = guard
 
     def step(self) -> bool:
         """Do one phase of one task. Returns False if there was nothing to do."""
@@ -169,6 +172,12 @@ class AgentRunner:
                 lost,
             )
             cost += result.cost_usd
+            if self.guard is not None:
+                problem = self.guard.check()
+                if problem is not None:
+                    # Possibly this session, possibly another: either way nothing more runs on it.
+                    self.coord.fail(a.task.id, a.token, problem, cost_usd=cost, escalate=True)
+                    return
             if lost.is_set():
                 return
             if not result.ok:

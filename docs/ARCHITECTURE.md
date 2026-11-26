@@ -56,7 +56,7 @@ flowchart LR
 - **The integrator is the only component that writes the target branch**, and it runs no model.
 - **Agents write only their own branches.** A worker's branch is named after its lease, so no two leases can share one.
 
-Code: `coordinator.py`, `runner.py`, `mergequeue.py`, `workspaces.py`, `executors.py`.
+Code: `coordinator.py`, `runner.py`, `mergequeue.py`, `guard.py`, `workspaces.py`, `executors.py`.
 
 ## 3. Roles
 
@@ -159,7 +159,7 @@ Not drawn: every non-terminal state except `merging` can go to `blocked` and to 
 | merging → done | outcome `merged` (landed now, or found already landed) |
 | merging → awaiting_merge | `target_moved`, `fenced`, integrator failure or lease expiry, while within `max_infra_retries` |
 | merging → ready / failed | `conflict` or `verify_failed`: rework with the output as feedback |
-| merging → blocked | `scope_violation` (defence in depth: resume to `ready`), or infra retries exhausted |
+| merging → blocked | `scope_violation` (defence in depth: resume to `ready`), `tampered` (resume to `awaiting_merge` once an operator has inspected the repository), or infra retries exhausted |
 | merging → cancelled | a deferred cancel, applied when the outcome is anything but `merged` |
 | blocked → (resume target) | operator `resume`; or a cancel that must first reconcile an unresolved merge (→ `awaiting_merge`) |
 | any open → cancelled | operator cancel, or an upstream task became `failed`/`cancelled` (cascade) |
@@ -276,6 +276,7 @@ sequenceDiagram
 | `scope_violation` | the rebased change touches a path outside the scope | `blocked` (should not happen: also checked at submit) |
 | `target_moved` | the CAS lost to another writer of the target | `awaiting_merge` (infra retry) |
 | `fenced` | a newer lease owns the fence | `awaiting_merge`; a stale integrator's report is rejected anyway |
+| `tampered` | the target ref, the shared git `config`, `info/attributes`, `objects/info/alternates` or a hook changed outside the integrator since the run started | `blocked` for an operator; nothing is rebased or landed |
 
 **Why the fence.** Lease expiry alone cannot stop a slow integrator that already passed its last check: it could land an attempt after the coordinator moved the task on, for example after a newer integrator reported a conflict and the task went back to rework. The fence ref puts the fencing token where the write happens. The claim only moves the fence to a *higher* token, and the landing transaction verifies the fence still holds *its* claim, so after a newer lease claims it no older integrator can land anything for that task. `test_newer_lease_fences_out_an_in_flight_merge` exercises this against real git; `test_detects_missing_merge_fence` shows the simulator catching a fence-less integrator landing a task that then failed.
 
@@ -326,6 +327,7 @@ fleet  (fleet_budget_usd, $500)
 | Integrator crashes mid-merge | lease expiry | `merge_unresolved`; next integrator claims the fence, then reconciles |
 | Stale integrator tries to land | fence verify in the landing transaction | nothing lands (`fenced`) |
 | Someone else moves the target | CAS in the landing transaction | `target_moved`; re-queued |
+| A worker session moves the target or changes git config or hooks through its worktree | `RepoGuard` check after the session and again under the landing lock | task blocked with the changes listed; the run stalls for an operator |
 | Rebase conflict | `git rebase` exit status | rework with conflict output |
 | Tests fail on the rebased tree | verify exit status or timeout | rework with output tail |
 | Cost above reservation | settlement | overrun recorded; account frozen if over limit |
@@ -342,6 +344,7 @@ fleet  (fleet_budget_usd, $500)
 - **Separation of duties.** The agent that wrote an attempt can never review it.
 - **Scope enforcement in two places**: at submit, and again on the rebased change before landing.
 - **Isolation is per lease**: unique worktree and branch; worktrees are removed after each phase.
+- **The shared repository is guarded, not trusted.** A worktree shares refs, config and hooks with the repository the integrator lands in, and `Bash` deny rules match command text (`sh -c 'git update-ref ...'` is not `git update-ref ...`). So every git command FLEET-A runs passes `-c core.hooksPath=/dev/null -c core.fsmonitor=false`, and `RepoGuard` (`fleet_a/guard.py`) snapshots the shared `config`, `info/attributes`, `objects/info/alternates` and `hooks/` at startup and tracks the one target tip the integrator itself produced. A worker checks it after every session, and the merge queue checks it before rebasing and again under the lock it lands with. Any difference blocks the task (`tampered`) instead of building on it. FLEET-A does not undo the change; the operator inspects it.
 - **Host isolation is the deployment's job.** Workers run `Bash` in their worktree. Run the fleet in a container or VM with no credentials beyond the model API key, no network egress except the model API and package mirrors the tests need, and a disposable clone of the repository.
 - **Audit**: every state change, reservation, settlement, expiry and rejected stale report is in the hash-chained event log; `fleet_a verify-log` detects any edit, deletion or reordering.
 

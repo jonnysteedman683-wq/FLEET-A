@@ -349,6 +349,7 @@ class MergeStatus(str, Enum):
     SCOPE_VIOLATION = "scope_violation"  # rebased change touches files outside the write scope
     TARGET_MOVED = "target_moved"  # compare-and-swap on the target ref lost a race
     FENCED = "fenced"  # a newer integrator lease owns this task's merge fence
+    TAMPERED = "tampered"  # the target ref, git config or hooks changed outside the integrator
 
 
 @dataclass(frozen=True)
