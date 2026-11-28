@@ -156,6 +156,13 @@ class FleetConfig:
     # back to rework with the test output, and no paid review is spent on it. If the target moved
     # since the attempt began, a failure is reviewed anyway and the merge queue's verify decides.
     verify_before_review: bool = True
+    # Run the integrator's verify_command in a container that mounts only the exported tree, with
+    # networking off. verify_image names the image (it must already hold the tools the command
+    # needs); verify_sandbox picks the engine: "auto" tries Podman then Docker and falls back to
+    # running unsandboxed with a warning, "podman" or "docker" require that engine, "none" never
+    # sandboxes. The worker's own pre-review verify is not sandboxed: the worker already ran code.
+    verify_image: str | None = None
+    verify_sandbox: str = "auto"
     # A review that hits review_budget is retried this many times, then the task is BLOCKED for
     # the operator to resume with a higher per-task review cap: each retry at the same cap can spend
     # all of it again.
@@ -195,6 +202,10 @@ class FleetConfig:
             raise ConfigError("verify_timeout_s must be a finite number > 0")
         if not isinstance(self.verify_before_review, bool):
             raise ConfigError("verify_before_review must be true or false")
+        if self.verify_image is not None and (not isinstance(self.verify_image, str) or not self.verify_image.strip()):
+            raise ConfigError("verify_image must be a non-empty image name, or null")
+        if self.verify_sandbox not in ("auto", "podman", "docker", "none"):
+            raise ConfigError('verify_sandbox must be "auto", "podman", "docker" or "none"')
         if (
             isinstance(self.max_review_budget_retries, bool)
             or not isinstance(self.max_review_budget_retries, int)
@@ -233,6 +244,8 @@ class FleetConfig:
             "aging_interval_s",
             "verify_timeout_s",
             "verify_before_review",
+            "verify_image",
+            "verify_sandbox",
             "max_review_budget_retries",
             "git_name",
             "git_email",

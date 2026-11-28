@@ -31,15 +31,25 @@ from fleet_a.workspaces import Workspaces, create_worker_clone
 RUN = "p1-run1"
 
 
-def isolated(repo: Path, tmp_path: Path, verify=()):
+def isolated(repo: Path, tmp_path: Path, verify=(), tree_attributes=False):
     landing = Git(repo)
     clone = create_worker_clone(landing, tmp_path / "worker-clone.git")
     work = Workspaces(clone, tmp_path / "work", upstream=landing)
     guard = RepoGuard(landing, "main")
+    integrator = Git(repo, tree_attributes=tree_attributes)  # as build_fleet makes it
     mq = MergeQueue(
-        landing, Workspaces(landing, tmp_path / "integrator"), "main", list(verify), 60, guard=guard, source=clone
+        integrator, Workspaces(integrator, tmp_path / "integrator"), "main", list(verify), 60, guard=guard, source=clone
     )
     return landing, clone, work, mq, guard
+
+
+def advance_main(repo: Path, tmp_path: Path, files: dict[str, str]) -> None:
+    wt = tmp_path / "advance"
+    git(repo, "worktree", "add", "-q", str(wt), "main")
+    for rel, text in files.items():
+        (wt / rel).write_text(text)
+    git(wt, "commit", "-qam", "advance")
+    git(repo, "worktree", "remove", "--force", str(wt))
 
 
 def attempt(ws: Workspaces, task_id: str, n: int, token: int, files: dict[str, str]) -> str:
@@ -341,3 +351,95 @@ def test_no_verify_command_means_no_export(repo, tmp_path, monkeypatch):
     monkeypatch.setattr(mq.workspaces, "export_tree", lambda *a: pytest.fail("exported with nothing to verify"))
     c = attempt(work, "T", 1, 1, {"src/t.py": "T = 1\n"})
     assert mq.integrate(RUN, "T", 1, 1, c, ("src/",)).status is MergeStatus.MERGED
+
+
+# ------------------------------------------------------------------- second review round
+
+
+@pytest.mark.parametrize("tree_attributes", [False, True])
+def test_a_worker_gitattributes_cannot_pick_a_driver_the_landing_config_defines(repo, tmp_path, tree_attributes):
+    """The landing (or global) config may define drivers, like filter.lfs. A worker's
+    .gitattributes must not get one of them to run while the integrator rebases. With the
+    in-tree attributes read (tree_attributes=True) they do run, so the test is not vacuous."""
+    lines = [f"line {i}\n" for i in range(10)]
+    wt = tmp_path / "seed"
+    git(repo, "worktree", "add", "-q", str(wt), "main")
+    (wt / "src" / "m.txt").write_text("".join(lines))
+    git(wt, "add", "-A")
+    git(wt, "commit", "-qm", "seed m.txt")
+    git(repo, "worktree", "remove", "--force", str(wt))
+    marker = tmp_path / "ran.txt"
+    git(repo, "config", "merge.evil.driver", f"sh -c 'echo merge >> {marker}; exit 1'")
+    git(repo, "config", "filter.evil.smudge", f"sh -c 'echo smudge >> {marker}; cat'")
+    git(repo, "config", "filter.evil.clean", f"sh -c 'echo clean >> {marker}; cat'")
+    landing, clone, work, mq, guard = isolated(repo, tmp_path, tree_attributes=tree_attributes)
+
+    mine = lines[:9] + ["worker\n"]
+    c = attempt(work, "T", 1, 1, {"src/.gitattributes": "* merge=evil filter=evil\n", "src/m.txt": "".join(mine)})
+    advance_main(repo, tmp_path, {"src/m.txt": "".join(["target\n"] + lines[1:])})
+    mq.guard = RepoGuard(landing, "main")  # main moved by the test, not by a worker
+    out = mq.integrate(RUN, "T", 1, 1, c, ("src/",))
+
+    ran = marker.read_text().split() if marker.exists() else []
+    if tree_attributes:
+        assert ran, "drivers never ran even with in-tree attributes, so this test proves nothing"
+        return
+    assert ran == [], ran
+    assert out.status is MergeStatus.MERGED, out.detail
+    assert git(repo, "show", "main:src/m.txt").splitlines() == ["target"] + [l.strip() for l in lines[1:9]] + ["worker"]
+
+
+def test_a_symlink_at_the_clone_path_is_refused_not_followed(repo, tmp_path):
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "keep.txt").write_text("keep\n")
+    os.symlink(victim, tmp_path / "c.git")
+    with pytest.raises(FleetError, match="symlink"):
+        create_worker_clone(Git(repo), tmp_path / "c.git")
+    assert (victim / "keep.txt").read_text() == "keep\n"
+
+
+@pytest.mark.parametrize("swap", ["run", "clones"])
+def test_run_cleanup_does_not_follow_a_swapped_in_symlink(tmp_path, swap):
+    from fleet_a.cli import remove_run_clones
+
+    victim = tmp_path / "victim"
+    (victim / "r1").mkdir(parents=True)
+    (victim / "r1" / "keep.txt").write_text("keep\n")
+    worktrees = tmp_path / "fleet"
+    if swap == "clones":
+        worktrees.mkdir()
+        os.symlink(victim, worktrees / "clones")
+    else:
+        (worktrees / "clones").mkdir(parents=True)
+        os.symlink(victim / "r1", worktrees / "clones" / "r1")
+    remove_run_clones(worktrees, "r1")
+    assert (victim / "r1" / "keep.txt").read_text() == "keep\n"
+
+
+def test_the_guard_notices_a_shallow_file(repo):
+    guard = RepoGuard(Git(repo), "main")
+    (repo / ".git" / "shallow").write_text(git(repo, "rev-parse", "main") + "\n")
+    assert "shallow" in (guard.check() or "")
+
+
+def test_export_keeps_paths_and_link_targets_that_are_not_utf8(repo, tmp_path):
+    landing = Git(repo)
+    name = b"caf\xe9.txt"  # latin-1, not valid UTF-8
+    blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=repo, input=b"x\n", capture_output=True, check=True).stdout.strip()
+    link = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=repo, input=name, capture_output=True, check=True).stdout.strip()
+    entries = b"100644 blob " + blob + b"\t" + name + b"\n" + b"120000 blob " + link + b"\tlink\n"
+    tree = subprocess.run(["git", "mktree"], cwd=repo, input=entries, capture_output=True, check=True).stdout.strip().decode()
+    commit = git(repo, "commit-tree", tree, "-m", "latin-1")
+    out = Workspaces(landing, tmp_path / "exp").export_tree(commit, f"{RUN}/x")
+    raw = os.fsencode(out)
+    assert open(raw + b"/" + name, "rb").read() == b"x\n"
+    assert os.readlink(raw + b"/link") == name
+
+
+def test_a_worker_worktree_on_the_target_does_not_block_the_base_sync(repo, tmp_path):
+    landing, clone, work, mq, guard = isolated(repo, tmp_path)
+    git(clone.repo, "worktree", "add", "-q", str(tmp_path / "squat"), "main")
+    advance_main(repo, tmp_path, {"README.md": "# moved\n"})
+    assert work.target_tip("main") == git(repo, "rev-parse", "main")
+    assert git(clone.repo, "rev-parse", "main") == git(repo, "rev-parse", "main")

@@ -26,7 +26,7 @@ from pathlib import Path
 from .git import Git
 
 # Files in the common git directory that change which programs git runs or which objects it sees.
-_WATCHED_FILES = ("config", "info/attributes", "info/grafts", "objects/info/alternates")
+_WATCHED_FILES = ("config", "info/attributes", "info/grafts", "objects/info/alternates", "shallow")
 
 
 def _digest(path: Path) -> str | None:
