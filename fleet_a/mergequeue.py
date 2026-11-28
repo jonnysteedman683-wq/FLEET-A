@@ -9,16 +9,20 @@ For one approved attempt it:
 2. Reconciles: if a commit whose parsed trailer block names this run, task and attempt is
    already on the target branch (a previous integrator landed it and then lost its lease), it
    reports MERGED without touching anything.
-3. Rebases the attempt onto the current target in a scratch worktree.
-4. Re-checks the write scope against the rebased change.
-5. Runs the verification command on the rebased tree.
-6. Lands with one atomic ``git update-ref --stdin`` transaction that verifies the fence still
+3. With a worker clone as ``source``, fetches the reviewed commit out of it by id. Workers never
+   touch this repository's refs, config or hooks: they work in that separate clone.
+4. Rebases the attempt onto the current target in a scratch worktree.
+5. Re-checks the write scope against the rebased change.
+6. Runs the verification command on the rebased tree. With a ``source`` it runs in a plain export
+   of that tree with no ``.git``, so the code under test cannot reach this repository through git.
+7. Lands with one atomic ``git update-ref --stdin`` transaction that verifies the fence still
    holds *its* claim and compare-and-swaps the target ref from the commit it rebased onto.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import threading
@@ -58,8 +62,10 @@ class MergeQueue:
         verify_command: Sequence[str],
         verify_timeout_s: float,
         guard: RepoGuard | None = None,
+        source: Git | None = None,
     ) -> None:
         self.guard = guard
+        self.source = source
         self.git = git
         self.workspaces = workspaces
         self.target_ref = f"refs/heads/{target_branch}"
@@ -90,6 +96,8 @@ class MergeQueue:
         if landed is not None:
             return MergeOutcome(MergeStatus.MERGED, landed, "already on target (reconciled)")
 
+        if self.source is not None and not self.workspaces.import_commit(self.source, commit):
+            return MergeOutcome(MergeStatus.CONFLICT, detail=f"commit {commit} could not be fetched from the worker clone")
         base = self.git.rev_parse(self.target_ref)
         scratch = self.workspaces.checkout_detached(commit, f"{run_id}/merge-{task_id}-a{attempt}-t{token}", base)
         try:
@@ -106,7 +114,7 @@ class MergeQueue:
                 return MergeOutcome(MergeStatus.SCOPE_VIOLATION, detail=f"outside write scope: {outside}")
             if cancel is not None and cancel.is_set():
                 return MergeOutcome(MergeStatus.VERIFY_FAILED, detail="verify command cancelled: lease lost")
-            ok, output = self.verify(scratch.path) if cancel is None else self.verify(scratch.path, cancel=cancel)
+            ok, output = self._verify_rebased(head, f"{run_id}/verify-{task_id}-a{attempt}-t{token}", scratch.path, cancel)
             if not ok:
                 return MergeOutcome(MergeStatus.VERIFY_FAILED, detail=output)
             if cancel is not None and cancel.is_set():
@@ -124,6 +132,15 @@ class MergeQueue:
             return MergeOutcome(MergeStatus.MERGED, head, f"landed on {self.target_ref}")
         finally:
             self.workspaces.remove(scratch)
+
+    def _verify_rebased(self, head: str, name: str, scratch: Path, cancel: threading.Event | None) -> tuple[bool, str]:
+        if self.source is None:
+            return self.verify(scratch) if cancel is None else self.verify(scratch, cancel=cancel)
+        export = self.workspaces.export_tree(head, name)
+        try:
+            return self.verify(export) if cancel is None else self.verify(export, cancel=cancel)
+        finally:
+            shutil.rmtree(export, ignore_errors=True)
 
     def _land(self, ref: str, fence: str, head: str, base: str) -> subprocess.CompletedProcess[str] | MergeOutcome:
         """The atomic update-ref; with a guard, checked and recorded under the guard's lock."""

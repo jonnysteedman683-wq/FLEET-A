@@ -15,7 +15,7 @@ class Git:
         self.name = name
         self.email = email
         self.timeout_s = timeout_s
-        self._env = {
+        self.env = {
             **os.environ,
             "GIT_TERMINAL_PROMPT": "0",
             "LC_ALL": "C",
@@ -53,7 +53,7 @@ class Git:
                 input=input,
                 capture_output=True,
                 text=True,
-                env=self._env,
+                env=self.env,
                 timeout=timeout or self.timeout_s,
             )
         except subprocess.TimeoutExpired as exc:

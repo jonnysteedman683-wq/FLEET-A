@@ -37,7 +37,7 @@ Use a dedicated clone of the repository with the target branch not checked out. 
 ## Verify the design
 
 ```bash
-python3 -m pytest -q                          # 204 tests, about 20 s
+python3 -m pytest -q                          # 215 tests, about 30 s
 python3 -m fleet_a simulate --runs 200        # randomized fault-injection runs; exits 1 on any violation
 ```
 
@@ -65,7 +65,7 @@ Every attempt costs one worker session and, if it passes the tests, one review s
 | `fleet_a/leases.py`, `scopes.py`, `budget.py`, `dag.py`, `events.py` | leases and fencing tokens, write scopes, the ledger, the task graph, the hash-chained log |
 | `fleet_a/runner.py` | the per-agent loop with heartbeats, and the multi-threaded `Fleet` |
 | `fleet_a/executors.py`, `prompts.py` | headless Claude Code sessions per role, prompts and output schemas |
-| `fleet_a/workspaces.py`, `mergequeue.py`, `git.py`, `guard.py` | per-lease worktrees, the fenced, idempotent integrator, and the check that blocks a session which moved the target or changed git config or hooks |
+| `fleet_a/workspaces.py`, `mergequeue.py`, `git.py`, `guard.py` | per-lease worktrees in a worker clone separate from the landing repository, the fenced, idempotent integrator, and the check that blocks a session which moved the target or changed git config or hooks |
 | `fleet_a/planner.py` | goal to validated plan |
 | `fleet_a/sim.py` | fault-injecting simulator and invariant checks |
 | `examples/` | a five-task plan and a full configuration |

@@ -1,7 +1,10 @@
-"""Detect a session that tampered with the shared repository instead of its own worktree.
+"""Detect a session that tampered with the landing repository instead of its own worktree.
 
-Workers run ``Bash`` in a git worktree, and a worktree shares refs, config and hooks with the
-repository the integrator lands in. The ``Bash(git update-ref *)``-style deny rules match command
+Workers run ``Bash`` in git worktrees of a separate worker clone (``workspaces.create_worker_clone``),
+so git alone never leads them to the repository the integrator lands in. Their filesystem access is
+still the deployment's to limit, though: a session that knows the landing repository's path can
+write there, and a worktree of the landing repository itself (as the tests set up) shares its refs,
+config and hooks. The ``Bash(git update-ref *)``-style deny rules match command
 text, so a session can still move the target branch (``sh -c 'git update-ref ...'``, a script, a
 write under ``.git/``) or change what git runs (a hook, ``core.fsmonitor``, a filter driver in
 ``config``, ``info/attributes``). Either one would land code without the fence, review, scope

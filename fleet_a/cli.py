@@ -18,7 +18,7 @@ from .coordinator import Coordinator, SystemClock
 from .dag import TaskGraph
 from .errors import FleetError
 from .events import EventLog, project_states
-from .executors import ClaudeCodeExecutor
+from .executors import ClaudeCodeExecutor, Executor
 from .git import Git
 from .guard import RepoGuard
 from .mergequeue import MergeQueue, landed_tasks
@@ -26,7 +26,7 @@ from .model import AgentInfo, Plan, Role, TaskState, format_usd, micros_to_usd
 from .planner import plan_goal
 from .runner import AgentRunner, Fleet
 from .sim import SimConfig, simulate
-from .workspaces import Workspaces
+from .workspaces import Workspaces, create_worker_clone
 
 
 def _load_json(path: str) -> Any:
@@ -99,15 +99,24 @@ def build_fleet(
     events_path: Path | None,
     worktrees: Path,
     claude_binary: str,
+    executor: Executor | None = None,
 ) -> tuple[Coordinator, Fleet]:
     git = Git(repo, name=config.git_name, email=config.git_email)
     git.rev_parse(f"refs/heads/{config.target_branch}")
-    workspaces = Workspaces(git, worktrees)
     guard = RepoGuard(git, config.target_branch)
+    # Workers and reviewers get worktrees of a separate clone; only the integrator touches ``repo``.
+    worker_git = create_worker_clone(git, worktrees / "worker-clone.git")
+    workspaces = Workspaces(worker_git, worktrees / "work", upstream=git)
     merge_queue = MergeQueue(
-        git, workspaces, config.target_branch, config.verify_command, config.verify_timeout_s, guard=guard
+        git,
+        Workspaces(git, worktrees / "integrator"),
+        config.target_branch,
+        config.verify_command,
+        config.verify_timeout_s,
+        guard=guard,
+        source=worker_git,
     )
-    executor = ClaudeCodeExecutor(claude_binary)
+    executor = executor or ClaudeCodeExecutor(claude_binary)
     coordinator = Coordinator(plan, config, SystemClock(), EventLog(events_path, fsync=True))
     runners = []
     for pool in config.agents:
