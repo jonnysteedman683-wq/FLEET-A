@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import shutil
 import stat
-import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -149,17 +148,7 @@ class Workspaces:
                 entries.append((mode, oid, rel))
         if not entries:
             return path
-        batch = subprocess.run(
-            ["git", "cat-file", "--batch"],
-            cwd=str(self.git.repo),
-            input="".join(f"{oid}\n" for _, oid, _ in entries).encode(),
-            capture_output=True,
-            env=self.git.env,
-            timeout=self.git.timeout_s,
-        )
-        if batch.returncode != 0:
-            raise self._error("git cat-file --batch", batch.stderr.decode(errors="replace"))
-        out, pos = batch.stdout, 0
+        out, pos = self.git.read_blobs([oid for _, oid, _ in entries]), 0
         for mode, oid, rel in entries:
             header_end = out.index(b"\n", pos)
             size = int(out[pos:header_end].split()[2])

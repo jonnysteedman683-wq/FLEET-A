@@ -62,6 +62,23 @@ class Git:
             raise GitError(f"git {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()[-2000:]}")
         return proc
 
+    def read_blobs(self, oids: list[str]) -> bytes:
+        """Raw ``git cat-file --batch`` output for ``oids``, in order (binary-safe)."""
+        try:
+            proc = subprocess.run(
+                ["git", "cat-file", "--batch"],
+                cwd=str(self.repo),
+                input="".join(f"{oid}\n" for oid in oids).encode(),
+                capture_output=True,
+                env=self.env,
+                timeout=self.timeout_s,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise GitError("git cat-file --batch timed out") from exc
+        if proc.returncode != 0:
+            raise GitError(f"git cat-file --batch failed: {proc.stderr.decode(errors='replace').strip()[-2000:]}")
+        return proc.stdout
+
     def rev_parse(self, ref: str, cwd: Path | None = None) -> str:
         return self.run("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", cwd=cwd).stdout.strip()
 

@@ -197,8 +197,9 @@ class TamperingModel:
         if task_id == "EVIL":
             common = (req.cwd / git(req.cwd, "rev-parse", "--git-common-dir")).resolve()
             program = f"sh -c 'pwd >> {self.marker}; cat'"
-            subprocess.run(["sh", "-c", f"git config filter.evil.clean \"{program}\""], cwd=req.cwd, check=True)
-            subprocess.run(["sh", "-c", f"git config filter.evil.smudge \"{program}\""], cwd=req.cwd, check=True)
+            # Through sh -c, as a Bash session would; the program is an argument, not shell text.
+            for key in ("filter.evil.clean", "filter.evil.smudge"):
+                subprocess.run(["sh", "-c", 'git config "$1" "$2"', "sh", key, program], cwd=req.cwd, check=True)
             (common / "hooks").mkdir(exist_ok=True)
             (common / "hooks" / "post-checkout").write_text(f"#!/bin/sh\npwd >> '{self.marker}'\n")
             (common / "hooks" / "post-checkout").chmod(0o755)
