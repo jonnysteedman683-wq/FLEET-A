@@ -11,7 +11,7 @@ The design is specified in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**. Its
 ## Requirements
 
 - Python 3.11+ (standard library only)
-- git 2.27+
+- git 2.42+ (the integrator uses `GIT_ATTR_SOURCE` to ignore in-tree attributes)
 - [Claude Code](https://code.claude.com) (`claude`) authenticated on the machine, for `plan` and `run`
 
 ## Use
@@ -37,7 +37,7 @@ Use a dedicated clone of the repository with the target branch not checked out. 
 ## Verify the design
 
 ```bash
-python3 -m pytest -q                          # 223 tests, about 35 s
+python3 -m pytest -q                          # 231 tests, about 40 s
 python3 -m fleet_a simulate --runs 200        # randomized fault-injection runs; exits 1 on any violation
 ```
 

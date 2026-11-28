@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import threading
 from pathlib import Path
@@ -12,7 +13,15 @@ from .errors import GitError
 
 
 class Git:
-    def __init__(self, repo: Path, *, name: str = "FLEET-A", email: str = "fleet-a@localhost", timeout_s: float = 300.0) -> None:
+    def __init__(
+        self,
+        repo: Path,
+        *,
+        name: str = "FLEET-A",
+        email: str = "fleet-a@localhost",
+        timeout_s: float = 300.0,
+        tree_attributes: bool = True,
+    ) -> None:
         self.repo = Path(repo).resolve()
         self.name = name
         self.email = email
@@ -27,6 +36,8 @@ class Git:
             "GIT_NO_REPLACE_OBJECTS": "1",
             "GIT_GRAFT_FILE": os.devnull,
         }
+        if not tree_attributes:
+            self._ignore_tree_attributes()
 
     def run(
         self,
@@ -55,6 +66,8 @@ class Git:
                 input=input,
                 capture_output=True,
                 text=True,
+                # Paths are bytes to git; keep any that aren't valid UTF-8 round-trippable.
+                errors="surrogateescape",
                 env=self.env,
                 timeout=timeout or self.timeout_s,
             )
@@ -63,6 +76,23 @@ class Git:
         if check and proc.returncode != 0:
             raise GitError(f"git {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()[-2000:]}")
         return proc
+
+    def _ignore_tree_attributes(self) -> None:
+        """Read ``.gitattributes`` from the empty tree instead of the files being merged.
+
+        A worker's ``.gitattributes`` could otherwise select a ``filter``, ``merge`` or ``diff``
+        driver that the landing repository's or the user's global config defines (``filter.lfs``
+        is common), and that program would then run while the integrator rebases. With
+        ``GIT_ATTR_SOURCE`` set to the empty tree no in-tree attribute applies; files are merged
+        and checked out as their blobs. It needs git 2.42 or later, which is checked here because
+        older versions ignore the variable silently.
+        """
+        version = self.run("version").stdout.split()[-1]
+        numbers = tuple(int(part) for part in re.findall(r"\d+", version)[:2])
+        if numbers < (2, 42):
+            raise GitError(f"the integrator needs git 2.42 or later to ignore in-tree attributes, found {version}")
+        empty_tree = self.run("hash-object", "-t", "tree", "--stdin", input="").stdout.strip()
+        self.env["GIT_ATTR_SOURCE"] = empty_tree
 
     def iter_blobs(self, oids: Sequence[str]) -> Iterator[bytes]:
         """Each object's content for ``oids``, in order, streamed from one ``git cat-file --batch``.

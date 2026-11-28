@@ -19,6 +19,7 @@ configure ever runs while the integrator merges.
 
 from __future__ import annotations
 
+import os
 import shutil
 import stat
 import threading
@@ -45,6 +46,9 @@ def create_worker_clone(landing: Git, path: Path) -> Git:
     hard-linked object file is the same inode as the landing repository's, writable by anyone who
     can ``chmod`` it. The clone keeps no remote, so nothing in it names the landing repository.
     """
+    if Path(path).is_symlink():
+        # resolve() would follow it and the rmtree below would empty wherever it points.
+        raise FleetError(f"worker clone path {path} is a symlink")
     path = Path(path).resolve()
     if path == landing.repo or path in landing.repo.parents or landing.repo in path.parents:
         raise FleetError(f"worker clone {path} must be outside the repository {landing.repo}")
@@ -167,7 +171,7 @@ class Workspaces:
                 raise FleetError(f"tree entry {rel!r} of {commit} is outside the export")
             target.parent.mkdir(parents=True, exist_ok=True)
             if mode == "120000":
-                target.symlink_to(data.decode())
+                target.symlink_to(os.fsdecode(data))
             else:
                 target.write_bytes(data)
                 if mode == "100755":

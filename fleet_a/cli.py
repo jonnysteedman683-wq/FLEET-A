@@ -99,6 +99,20 @@ def run_clones_dir(worktrees: Path, run_id: str) -> Path:
     return Path(worktrees) / "clones" / run_id
 
 
+def remove_run_clones(worktrees: Path, run_id: str) -> None:
+    """Delete one run's clones, refusing to follow a symlink out of the worktrees directory.
+
+    Workers run a shell and could swap ``clones`` or ``clones/<run>`` for a link elsewhere.
+    """
+    path = run_clones_dir(worktrees, run_id)
+    resolved = path.resolve()
+    root = Path(worktrees).resolve()
+    if path.is_symlink() or root not in resolved.parents:
+        print(f"not removing {path}: it leads outside {root}", file=sys.stderr)
+        return
+    shutil.rmtree(resolved, ignore_errors=True)
+
+
 def build_fleet(
     repo: Path,
     plan: Plan,
@@ -122,9 +136,12 @@ def build_fleet(
     review_git = create_worker_clone(git, clones / "reviewer.git")
     workspaces = Workspaces(worker_git, worktrees / "work", upstream=git)
     review_workspaces = Workspaces(review_git, worktrees / "review", commits_from=worker_git)
+    # The integrator's git reads no in-tree .gitattributes, so a worker's commit can't pick a
+    # filter or merge driver from the landing or global config to run while it is rebased.
+    integrator_git = Git(repo, name=config.git_name, email=config.git_email, tree_attributes=False)
     merge_queue = MergeQueue(
-        git,
-        Workspaces(git, worktrees / "integrator"),
+        integrator_git,
+        Workspaces(integrator_git, worktrees / "integrator"),
         config.target_branch,
         config.verify_command,
         config.verify_timeout_s,
@@ -168,7 +185,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         report = fleet.run(timeout_s=args.timeout)
     finally:
         coordinator.events.close()
-        shutil.rmtree(run_clones_dir(worktrees, coordinator.run_id), ignore_errors=True)
+        remove_run_clones(worktrees, coordinator.run_id)
     _emit(
         {
             "finished": report.finished,
