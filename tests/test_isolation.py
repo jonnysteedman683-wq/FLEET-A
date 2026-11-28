@@ -240,3 +240,104 @@ def test_fleet_lands_reviewed_work_while_a_worker_tampers_with_its_clone(repo, t
     assert ran, "the planted filter never ran at all, so this test proves nothing"
     integrator = str((tmp_path / "fleet" / "integrator").resolve())
     assert not [d for d in ran if d.startswith(integrator) or d.startswith(str(repo))], ran
+
+
+# ------------------------------------------------------------------------- review follow-ups
+
+
+def test_a_url_rewrite_in_the_clone_cannot_fake_the_base(repo, tmp_path):
+    """A worker can point the clone's fetches of the landing path at a repository it controls;
+    the base still comes from the landing repository, by id."""
+    landing, clone, work, mq, guard = isolated(repo, tmp_path)
+    evil = tmp_path / "evil"
+    git(tmp_path, "clone", "-q", str(repo), str(evil))
+    git(evil, "commit", "-q", "--allow-empty", "-m", "fake base")
+    git(clone.repo, "config", f"url.{evil}.insteadOf", str(repo))
+    wt = work.create_worktree(RUN, "T", 1, 1, "main")
+    assert wt.base == git(repo, "rev-parse", "main")
+    assert git(clone.repo, "rev-parse", "main") == wt.base
+    work.remove(wt)
+
+
+@pytest.mark.parametrize("shape", ["stacked", "merge"])
+def test_only_a_single_commit_on_a_target_base_is_landed(repo, tmp_path, shape):
+    """A rebase replays every commit missing from the target, so an attempt hiding unreviewed
+    history under the reviewed diff (a faked base, a merge) is refused before any rebase."""
+    landing, clone, work, mq, guard = isolated(repo, tmp_path)
+    wt = work.create_worktree(RUN, "T", 1, 1, "main")
+    (wt.path / "src" / "hidden.py").write_text("HIDDEN = 1\n")
+    git(wt.path, "add", "-A")
+    git(wt.path, "commit", "-q", "-m", "hidden")
+    if shape == "merge":
+        hidden = git(wt.path, "rev-parse", "HEAD")
+        git(wt.path, "checkout", "-q", wt.base)
+        (wt.path / "src" / "t.py").write_text("T = 1\n")
+        git(wt.path, "add", "-A")
+        git(wt.path, "commit", "-q", "-m", "reviewed")
+        git(wt.path, "merge", "-q", "--no-edit", hidden)
+    else:
+        (wt.path / "src" / "t.py").write_text("T = 1\n")
+        git(wt.path, "add", "-A")
+        git(wt.path, "commit", "-q", "-m", "reviewed")
+    commit = git(wt.path, "rev-parse", "HEAD")
+    work.remove(wt)
+    before = git(repo, "rev-parse", "main")
+    out = mq.integrate(RUN, "T", 1, 1, commit, ("src/",))
+    assert out.status is MergeStatus.TAMPERED and "single commit" in out.detail, out.detail
+    assert git(repo, "rev-parse", "main") == before
+
+
+def test_reviewers_see_the_commit_not_what_a_workers_filter_shows(repo, tmp_path):
+    landing, clone, work, mq, guard = isolated(repo, tmp_path)
+    review = Workspaces(create_worker_clone(landing, tmp_path / "reviewer.git"), tmp_path / "review", commits_from=clone)
+    git(clone.repo, "config", "filter.hide.smudge", "sed s/EVIL/fine/")
+    git(clone.repo, "config", "filter.hide.clean", "cat")
+    c = attempt(work, "T", 1, 1, {"src/.gitattributes": "*.py filter=hide\n", "src/t.py": "EVIL = 1\n"})
+    in_clone = work.checkout_detached(c, f"{RUN}/look")
+    assert (in_clone.path / "src" / "t.py").read_text() == "fine = 1\n"  # the worker's filter at work
+    work.remove(in_clone)
+    wt = review.checkout_detached(c, f"{RUN}/review-T")
+    assert (wt.path / "src" / "t.py").read_text() == "EVIL = 1\n"
+    review.remove(wt)
+
+
+def test_two_runs_in_one_worktrees_dir_get_their_own_clones(repo, tmp_path):
+    conf = config(verify_command=())
+    plan = plan_of(spec("A"))
+    kw = dict(worktrees=tmp_path / "fleet", claude_binary="unused", executor=CallableExecutor(lambda r: None))
+    first, _ = build_fleet(repo, plan, conf, events_path=tmp_path / "e1.jsonl", **kw)
+    second, _ = build_fleet(repo, plan, conf, events_path=tmp_path / "e2.jsonl", **kw)
+    clones = tmp_path / "fleet" / "clones"
+    assert first.run_id != second.run_id
+    for run in (first.run_id, second.run_id):
+        assert (clones / run / "worker.git" / "HEAD").exists() and (clones / run / "reviewer.git" / "HEAD").exists()
+
+
+def test_cli_run_removes_its_clones(repo, tmp_path, monkeypatch):
+    import json
+    from fleet_a import cli
+
+    monkeypatch.setattr(cli.Fleet, "run", lambda self, timeout_s=None: (_ for _ in ()).throw(RuntimeError("boom")))
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(plan_of(spec("A")).to_dict()))
+    with pytest.raises(RuntimeError, match="boom"):
+        cli.main(["run", "--repo", str(repo), "--plan", str(plan), "--worktrees", str(tmp_path / "fleet")])
+    assert list((tmp_path / "fleet" / "clones").iterdir()) == []
+
+
+def test_export_streams_many_and_large_files(repo, tmp_path):
+    landing, clone, work, mq, guard = isolated(repo, tmp_path)
+    files = {f"src/many/f{i:03}.txt": f"{i}\n" * 50 for i in range(400)}
+    files["src/big.bin"] = "x" * (3 * 1024 * 1024)
+    c = attempt(work, "T", 1, 1, files)
+    assert mq.integrate(RUN, "T", 1, 1, c, ("src/",)).status is MergeStatus.MERGED
+    out = Workspaces(landing, tmp_path / "exp").export_tree(git(repo, "rev-parse", "main"), f"{RUN}/x")
+    for rel, text in files.items():
+        assert (out / rel).read_text() == text
+
+
+def test_no_verify_command_means_no_export(repo, tmp_path, monkeypatch):
+    landing, clone, work, mq, guard = isolated(repo, tmp_path, verify=())
+    monkeypatch.setattr(mq.workspaces, "export_tree", lambda *a: pytest.fail("exported with nothing to verify"))
+    c = attempt(work, "T", 1, 1, {"src/t.py": "T = 1\n"})
+    assert mq.integrate(RUN, "T", 1, 1, c, ("src/",)).status is MergeStatus.MERGED

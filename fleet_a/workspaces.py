@@ -8,11 +8,13 @@ left behind. Reviewers and the integrator check out detached worktrees of a spec
 
 Workers and reviewers run a model with ``Bash``, so their worktrees never belong to the repository
 the integrator lands in: a worktree shares refs, config and hooks with its repository.
-``create_worker_clone`` makes a separate bare clone for them, and their ``Workspaces`` has that
-repository as its ``upstream``, fetching the target branch from it before each attempt. The
-integrator keeps its own ``Workspaces`` on the landing repository, fetches each reviewed commit out
-of the worker clone by id, and runs the verify command in a plain export of the rebased tree, so
-no program a worker could configure ever runs while the integrator merges.
+``create_worker_clone`` makes a separate bare clone for workers and another for reviewers. The
+workers' ``Workspaces`` has the landing repository as its ``upstream`` and takes each base from it
+by id. The reviewers' has the worker clone as ``commits_from`` and fetches each commit from it by
+id, so a worker's filters never shape what a reviewer sees. The integrator keeps its own
+``Workspaces`` on the landing repository, fetches each reviewed commit out of the worker clone by
+id, and runs the verify command in a plain export of the rebased tree, so no program a worker could
+configure ever runs while the integrator merges.
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ class Worktree:
 
 
 def create_worker_clone(landing: Git, path: Path) -> Git:
-    """A fresh bare clone of ``landing`` at ``path`` for worker and reviewer worktrees.
+    """A fresh bare clone of ``landing`` at ``path`` for worker (or reviewer) worktrees.
 
     Anything already at ``path`` is replaced, so no config, hook or ref a previous run's workers
     left there carries over. ``--no-local`` copies objects instead of hard-linking them: a
@@ -56,26 +58,32 @@ def create_worker_clone(landing: Git, path: Path) -> Git:
 
 
 class Workspaces:
-    def __init__(self, git: Git, root: Path, *, upstream: Git | None = None) -> None:
+    def __init__(
+        self, git: Git, root: Path, *, upstream: Git | None = None, commits_from: Git | None = None
+    ) -> None:
         self.git = git
         self.upstream = upstream
+        self.commits_from = commits_from
         self._sync = threading.Lock()  # runners fetch concurrently; one ref update at a time
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
     def target_tip(self, target_branch: str) -> str:
-        """The target branch's tip, fetched from ``upstream`` first when there is one.
+        """The target branch's tip, read from ``upstream`` when there is one.
 
-        The forced refspec also resets the branch if a worker moved it inside the worker clone.
+        The tip is read in the landing repository, never through this clone's config, and fetched
+        here by id: a worker's ``url.*.insteadOf`` or a moved branch can change where the fetch
+        goes, not which commit arrives. The clone's branch is then reset to it.
         """
         ref = f"refs/heads/{target_branch}"
-        if self.upstream is not None:
-            with self._sync:
-                self.git.run(
-                    "fetch", "-q", "--no-tags", "--no-write-fetch-head", str(self.upstream.repo), f"+{ref}:{ref}"
-                )
-                return self.git.rev_parse(ref)
-        return self.git.rev_parse(ref)
+        if self.upstream is None:
+            return self.git.rev_parse(ref)
+        tip = self.upstream.rev_parse(ref)
+        with self._sync:
+            if not self.import_commit(self.upstream, tip):
+                raise FleetError(f"could not bring {tip} ({ref}) into {self.git.repo}")
+            self.git.run("update-ref", ref, tip)
+        return tip
 
     def create_worktree(
         self, run_id: str, task_id: str, attempt: int, token: int, target_branch: str
@@ -91,7 +99,13 @@ class Workspaces:
         return Worktree(path=path, branch=branch, base=base)
 
     def checkout_detached(self, commit: str, name: str, base: str | None = None) -> Worktree:
-        """Check out ``commit`` at ``<root>/<name>``; callers put their run id in ``name``."""
+        """Check out ``commit`` at ``<root>/<name>``; callers put their run id in ``name``.
+
+        With ``commits_from`` (a reviewer clone reading the worker clone), the commit is fetched
+        from there by id first.
+        """
+        if self.commits_from is not None and not self.import_commit(self.commits_from, commit):
+            raise FleetError(f"commit {commit} could not be fetched from {self.commits_from.repo}")
         path = self._inside_root(Path(name))
         self._clear(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -146,14 +160,8 @@ class Workspaces:
             mode, kind, oid = meta.split()
             if kind == "blob":
                 entries.append((mode, oid, rel))
-        if not entries:
-            return path
-        out, pos = self.git.read_blobs([oid for _, oid, _ in entries]), 0
-        for mode, oid, rel in entries:
-            header_end = out.index(b"\n", pos)
-            size = int(out[pos:header_end].split()[2])
-            data = out[header_end + 1 : header_end + 1 + size]
-            pos = header_end + 1 + size + 1
+        blobs = self.git.iter_blobs([oid for _, oid, _ in entries])
+        for (mode, _, rel), data in zip(entries, blobs):
             target = path / rel
             if path not in target.parent.resolve().parents and target.parent.resolve() != path:
                 raise FleetError(f"tree entry {rel!r} of {commit} is outside the export")

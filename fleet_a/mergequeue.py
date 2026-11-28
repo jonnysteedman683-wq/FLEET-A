@@ -96,8 +96,20 @@ class MergeQueue:
         if landed is not None:
             return MergeOutcome(MergeStatus.MERGED, landed, "already on target (reconciled)")
 
-        if self.source is not None and not self.workspaces.import_commit(self.source, commit):
-            return MergeOutcome(MergeStatus.CONFLICT, detail=f"commit {commit} could not be fetched from the worker clone")
+        if self.source is not None:
+            if not self.workspaces.import_commit(self.source, commit):
+                return MergeOutcome(MergeStatus.CONFLICT, detail=f"commit {commit} could not be fetched from the worker clone")
+            # An attempt is one squash commit on a base taken from the target. Anything else would
+            # make the rebase replay history nobody reviewed, such as a base faked in the clone.
+            parents = self.git.run("rev-list", "--parents", "-n", "1", commit).stdout.split()[1:]
+            on_target = len(parents) == 1 and self.git.run(
+                "merge-base", "--is-ancestor", parents[0], self.target_ref, check=False
+            ).returncode == 0
+            if not on_target:
+                return MergeOutcome(
+                    MergeStatus.TAMPERED,
+                    detail=f"commit {commit} is not a single commit on a base from {self.target_ref} (parents {parents})",
+                )
         base = self.git.rev_parse(self.target_ref)
         scratch = self.workspaces.checkout_detached(commit, f"{run_id}/merge-{task_id}-a{attempt}-t{token}", base)
         try:
@@ -134,7 +146,7 @@ class MergeQueue:
             self.workspaces.remove(scratch)
 
     def _verify_rebased(self, head: str, name: str, scratch: Path, cancel: threading.Event | None) -> tuple[bool, str]:
-        if self.source is None:
+        if self.source is None or not self.verify_command:
             return self.verify(scratch) if cancel is None else self.verify(scratch, cancel=cancel)
         export = self.workspaces.export_tree(head, name)
         try:

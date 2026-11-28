@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from pathlib import Path
+from typing import Iterator, Sequence
 
 from .errors import GitError
 
@@ -62,22 +64,57 @@ class Git:
             raise GitError(f"git {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()[-2000:]}")
         return proc
 
-    def read_blobs(self, oids: list[str]) -> bytes:
-        """Raw ``git cat-file --batch`` output for ``oids``, in order (binary-safe)."""
+    def iter_blobs(self, oids: Sequence[str]) -> Iterator[bytes]:
+        """Each object's content for ``oids``, in order, streamed from one ``git cat-file --batch``.
+
+        Only one object is held in memory at a time. A feeder thread writes the ids so a large
+        request can't deadlock against a full stdout pipe.
+        """
+        proc = subprocess.Popen(
+            ["git", "cat-file", "--batch"],
+            cwd=str(self.repo),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=self.env,
+        )
+        assert proc.stdin is not None and proc.stdout is not None
+        stdin = proc.stdin
+
+        def feed() -> None:
+            try:
+                for oid in oids:
+                    stdin.write(f"{oid}\n".encode())
+            except (BrokenPipeError, ValueError):
+                pass
+            finally:
+                try:
+                    stdin.close()
+                except (BrokenPipeError, ValueError):
+                    pass
+
+        feeder = threading.Thread(target=feed, daemon=True)
+        feeder.start()
         try:
-            proc = subprocess.run(
-                ["git", "cat-file", "--batch"],
-                cwd=str(self.repo),
-                input="".join(f"{oid}\n" for oid in oids).encode(),
-                capture_output=True,
-                env=self.env,
-                timeout=self.timeout_s,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise GitError("git cat-file --batch timed out") from exc
-        if proc.returncode != 0:
-            raise GitError(f"git cat-file --batch failed: {proc.stderr.decode(errors='replace').strip()[-2000:]}")
-        return proc.stdout
+            for oid in oids:
+                header = proc.stdout.readline().split()
+                if len(header) != 3 or header[0].decode() != oid:
+                    raise GitError(f"git cat-file --batch: unexpected answer for {oid}: {header!r}")
+                size = int(header[2])
+                data = proc.stdout.read(size)
+                if len(data) != size or proc.stdout.read(1) != b"\n":
+                    raise GitError(f"git cat-file --batch: short read for {oid}")
+                yield data
+        finally:
+            if proc.poll() is None and feeder.is_alive():
+                proc.kill()  # stopped early: unblock the feeder
+            feeder.join(timeout=self.timeout_s)
+            proc.stdout.close()
+            try:
+                proc.wait(timeout=self.timeout_s)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
 
     def rev_parse(self, ref: str, cwd: Path | None = None) -> str:
         return self.run("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", cwd=cwd).stdout.strip()

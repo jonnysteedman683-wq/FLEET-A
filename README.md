@@ -37,7 +37,7 @@ Use a dedicated clone of the repository with the target branch not checked out. 
 ## Verify the design
 
 ```bash
-python3 -m pytest -q                          # 215 tests, about 30 s
+python3 -m pytest -q                          # 223 tests, about 35 s
 python3 -m fleet_a simulate --runs 200        # randomized fault-injection runs; exits 1 on any violation
 ```
 
