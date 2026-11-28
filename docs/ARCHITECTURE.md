@@ -228,7 +228,8 @@ The aging term adds one priority point per `aging_interval_s` (600 s) of waiting
 
 ## 8. Workspaces and attempts
 
-- Each worker lease gets a new worktree at `<worktrees>/<run>/<task>-a<attempt>-t<token>` on branch `fleet/<run>/<task>/a<attempt>-t<token>`, created from the current tip of the target branch. The run id is part of both because fencing tokens restart at 1 in every run: without it, a second run of the same plan collides with branches an earlier run left behind. Reviewer and integrator checkouts live under `<worktrees>/<run>/` too.
+- Workers and reviewers never get a worktree of the repository the integrator lands in. At startup `fleet_a run` makes two fresh bare clones for the run, `<worktrees>/clones/<run>/worker.git` and `reviewer.git`. Both are made with `--no-local`, so no object file is hard-linked into the landing repository, and neither has a remote. Each run gets its own pair, so two runs sharing a worktrees directory never touch each other's clones, and `fleet_a run` deletes them when it exits. Before each attempt the target's tip is read in the landing repository and fetched into the worker clone by id. The clone's branch is then reset to it, so neither a moved branch nor a `url.*.insteadOf` rewrite in the clone can give a worker a different base. Reviewer checkouts fetch the commit from the worker clone by id into the reviewer clone, so a filter a worker plants in its clone cannot change what a reviewer sees.
+- Each worker lease gets a new worktree at `<worktrees>/work/<run>/<task>-a<attempt>-t<token>` on branch `fleet/<run>/<task>/a<attempt>-t<token>`, created from the current tip of the target branch. The run id is part of both because fencing tokens restart at 1 in every run: without it, a second run of the same plan collides with branches an earlier run left behind. Reviewer checkouts live under `<worktrees>/review/<run>/`. The integrator's scratch worktrees are worktrees of the landing repository, under `<worktrees>/integrator/<run>/`.
 - The worker session edits files only. When it returns `status: "done"`, the runner squashes everything (including any commits the agent made) into **one commit on top of the base**, with trailers:
 
   ```
@@ -260,9 +261,11 @@ sequenceDiagram
     alt already landed
         I-->>I: outcome merged (no writes)
     else not landed
+        I->>I: fetch the reviewed commit by id from the worker clone
+        I->>I: refuse it unless it is one commit whose parent is on T
         I->>I: rebase the attempt onto T's tip (scratch worktree)
         I->>I: re-check write scope on the rebased change
-        I->>I: run verify_command on the rebased tree
+        I->>I: run verify_command in a plain export of the rebased tree
         I->>T: update-ref --stdin { verify F = blob("t"); update T new old }
         Note over I,T: one atomic transaction: lands only if this lease still owns the fence and T has not moved
     end
@@ -271,7 +274,7 @@ sequenceDiagram
 | Outcome | Meaning | Task goes to |
 |---|---|---|
 | `merged` | landed now, or found already landed | `done` |
-| `conflict` | rebase failed, or the rebase left no change | rework |
+| `conflict` | the commit could not be fetched from the worker clone, the rebase failed, or the rebase left no change | rework |
 | `verify_failed` | verification command failed or timed out | rework, with its output tail as feedback |
 | `scope_violation` | the rebased change touches a path outside the scope | `blocked` (should not happen: also checked at submit) |
 | `target_moved` | the CAS lost to another writer of the target | `awaiting_merge` (infra retry) |
@@ -327,7 +330,7 @@ fleet  (fleet_budget_usd, $500)
 | Integrator crashes mid-merge | lease expiry | `merge_unresolved`; next integrator claims the fence, then reconciles |
 | Stale integrator tries to land | fence verify in the landing transaction | nothing lands (`fenced`) |
 | Someone else moves the target | CAS in the landing transaction | `target_moved`; re-queued |
-| A worker session moves the target or changes git config or hooks through its worktree | `RepoGuard` check after the session and again under the landing lock | task blocked with the changes listed; the run stalls for an operator |
+| A worker session moves the target or changes git config or hooks | its worktree belongs to the worker clone, so this reaches only the clone. Anything that still reaches the landing repository, for example by its path, is caught by the `RepoGuard` check after the session and again under the landing lock | in the clone: nothing; the next attempt re-fetches the target. In the landing repository: task blocked with the changes listed, and the run stalls for an operator |
 | Rebase conflict | `git rebase` exit status | rework with conflict output |
 | Tests fail on the rebased tree | verify exit status or timeout | rework with output tail |
 | Cost above reservation | settlement | overrun recorded; account frozen if over limit |
@@ -344,7 +347,8 @@ fleet  (fleet_budget_usd, $500)
 - **Separation of duties.** The agent that wrote an attempt can never review it.
 - **Scope enforcement in two places**: at submit, and again on the rebased change before landing.
 - **Isolation is per lease**: unique worktree and branch; worktrees are removed after each phase.
-- **The shared repository is guarded, not trusted.** A worktree shares refs, config and hooks with the repository the integrator lands in, and `Bash` deny rules match command text (`sh -c 'git update-ref ...'` is not `git update-ref ...`). So every git command FLEET-A runs passes `-c core.hooksPath=/dev/null -c core.fsmonitor=false`, and `RepoGuard` (`fleet_a/guard.py`) snapshots the shared `config`, `info/attributes`, `objects/info/alternates` and `hooks/` at startup and tracks the one target tip the integrator itself produced. A worker checks it after every session, and the merge queue checks it before rebasing and again under the lock it lands with. Any difference blocks the task (`tampered`) instead of building on it. FLEET-A does not undo the change; the operator inspects it.
+- **Workers never share the landing repository.** A worktree shares refs, config and hooks with its repository, and `Bash` deny rules match command text (`sh -c 'git update-ref ...'` is not `git update-ref ...`). So worker and reviewer worktrees belong to separate bare clones. The integrator fetches each reviewed commit out of the worker clone by id, and refuses it (`tampered`) unless it is a single commit whose parent is on the target. A rebase replays every commit the target lacks, so a faked base or a merge could otherwise carry history nobody reviewed. Objects are addressed by hash, and fetching runs only `upload-pack` in the clone, which git hardens against the serving repository's own config. It then rebases in a worktree of the landing repository, whose config, attributes and hooks no worker session can reach through git. It runs `verify_command` in a plain export of the rebased tree, streamed straight from the object database with no `.git`, so the code under test cannot find the landing repository through git either. With no `verify_command` there is nothing to export. A worker that plants a filter driver, hook or `core.fsmonitor` in the worker clone affects only that clone and the workers that use it. The verify command runs the attempt's own code, so it can still read or write anything the fleet's user can, including the landing repository by its path. A symlink in the tree gives it no more access than that. Containing that is the host isolation described below, and the guard catches any change it makes to the landing repository.
+- **The landing repository is guarded too, not trusted.** The worker clone keeps sessions away from it through git, not through the filesystem: a session that knows its path can still write there. So every git command FLEET-A runs passes `-c core.hooksPath=/dev/null -c core.fsmonitor=false` and ignores `refs/replace` and `info/grafts` (`GIT_NO_REPLACE_OBJECTS`, `GIT_GRAFT_FILE`), and `RepoGuard` (`fleet_a/guard.py`) snapshots the shared `config`, `info/attributes`, `info/grafts`, `objects/info/alternates`, `hooks/` and `refs/replace/` at startup and tracks the one target tip the integrator itself produced. A worker checks it after every session, and the merge queue checks it before rebasing and again under the lock it lands with. Any difference blocks the task (`tampered`) instead of building on it. FLEET-A does not undo the change; the operator inspects it.
 - **Host isolation is the deployment's job.** Workers run `Bash` in their worktree. Run the fleet in a container or VM with no credentials beyond the model API key, no network egress except the model API and package mirrors the tests need, and a disposable clone of the repository.
 - **Audit**: every state change, reservation, settlement, expiry and rejected stale report is in the hash-chained event log; `fleet_a verify-log` detects any edit, deletion or reordering.
 
@@ -448,7 +452,7 @@ All keys optional; unknown keys are errors. Dollar values are decimal strings.
 | `max_concurrent` | worker 8, reviewer 2, integrator 1 | active phases per role (integrator must be 1) |
 | `max_infra_retries` | `3` | before a review or merge phase blocks |
 | `aging_interval_s` | `600` | seconds of waiting per priority point |
-| `verify_command`, `verify_timeout_s` | `["python3","-m","pytest","-q"]`, `1200` | run on the rebased tree; `[]` skips |
+| `verify_command`, `verify_timeout_s` | `["python3","-m","pytest","-q"]`, `1200` | run by the merge queue in a plain export of the rebased tree, a directory with no `.git` (a command that needs git metadata will fail there); `[]` skips |
 | `verify_before_review` | `true` | also run `verify_command` in the worker's worktree before review; a failure is rework, not a paid review, unless the target moved since the attempt began (then the attempt is reviewed and the merge queue decides). The run is killed if the lease is lost |
 | `max_review_budget_retries` | `1` | reviews stopped at `review_budget_usd` retried before the task blocks |
 | `agents` | 4 workers, 1 reviewer, 1 integrator | `[{role, count, capabilities, prefix}]` |

@@ -222,3 +222,28 @@ def test_fleet_blocks_a_worker_that_moves_the_target_and_lands_nothing_after(rep
     assert "awaiting operator: EVIL" in report.stall_reason
     subjects = git(repo, "log", "--format=%s", "main").splitlines()
     assert subjects[0] == "not reviewed" and not any(s.startswith("fleet(") for s in subjects)
+
+
+def test_replace_refs_cannot_swap_a_reviewed_commit(repo, tmp_path):
+    g, ws, mq, _ = setup(repo, tmp_path)
+    reviewed = attempt(ws, "T", 1, 1, {"src/t.py": "T = 1\n"})
+    evil = attempt(ws, "T", 2, 2, {"src/t.py": "T = 'evil'\n"})
+    git(repo, "replace", reviewed, evil)
+    assert git(repo, "show", f"{reviewed}:src/t.py") == "T = 'evil'"  # plain git is fooled
+    assert g.run("show", f"{reviewed}:src/t.py").stdout.strip() == "T = 1"  # FLEET-A's git is not
+
+    out = mq.integrate(RUN, "T", 1, 1, reviewed, ("src/",))
+    assert out.status is MergeStatus.TAMPERED and "refs/replace changed" in out.detail
+
+    _, _, fresh_mq, _ = setup(repo, tmp_path / "after")  # a guard that started with the replace ref
+    assert fresh_mq.integrate(RUN, "T", 1, 3, reviewed, ("src/",)).status is MergeStatus.MERGED
+    assert g.run("show", "refs/heads/main:src/t.py").stdout.strip() == "T = 1"
+
+
+def test_grafts_file_changes_are_caught(repo, tmp_path):
+    g, ws, mq, _ = setup(repo, tmp_path)
+    c = attempt(ws, "T", 1, 1, {"src/t.py": "T = 1\n"})
+    (common_dir(repo) / "info").mkdir(exist_ok=True)
+    (common_dir(repo) / "info" / "grafts").write_text(f"{c}\n")
+    out = mq.integrate(RUN, "T", 1, 1, c, ("src/",))
+    assert out.status is MergeStatus.TAMPERED and "info/grafts changed" in out.detail

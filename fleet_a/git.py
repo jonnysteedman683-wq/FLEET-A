@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from pathlib import Path
+from typing import Iterator, Sequence
 
 from .errors import GitError
 
@@ -15,7 +17,16 @@ class Git:
         self.name = name
         self.email = email
         self.timeout_s = timeout_s
-        self._env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C", "GIT_EDITOR": "true"}
+        self.env = {
+            **os.environ,
+            "GIT_TERMINAL_PROMPT": "0",
+            "LC_ALL": "C",
+            "GIT_EDITOR": "true",
+            # refs/replace and info/grafts are shared with worker worktrees and would let one swap
+            # the content or parents of a reviewed commit: read every object as it really is.
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_GRAFT_FILE": os.devnull,
+        }
 
     def run(
         self,
@@ -44,7 +55,7 @@ class Git:
                 input=input,
                 capture_output=True,
                 text=True,
-                env=self._env,
+                env=self.env,
                 timeout=timeout or self.timeout_s,
             )
         except subprocess.TimeoutExpired as exc:
@@ -52,6 +63,58 @@ class Git:
         if check and proc.returncode != 0:
             raise GitError(f"git {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()[-2000:]}")
         return proc
+
+    def iter_blobs(self, oids: Sequence[str]) -> Iterator[bytes]:
+        """Each object's content for ``oids``, in order, streamed from one ``git cat-file --batch``.
+
+        Only one object is held in memory at a time. A feeder thread writes the ids so a large
+        request can't deadlock against a full stdout pipe.
+        """
+        proc = subprocess.Popen(
+            ["git", "cat-file", "--batch"],
+            cwd=str(self.repo),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=self.env,
+        )
+        assert proc.stdin is not None and proc.stdout is not None
+        stdin = proc.stdin
+
+        def feed() -> None:
+            try:
+                for oid in oids:
+                    stdin.write(f"{oid}\n".encode())
+            except (BrokenPipeError, ValueError):
+                pass
+            finally:
+                try:
+                    stdin.close()
+                except (BrokenPipeError, ValueError):
+                    pass
+
+        feeder = threading.Thread(target=feed, daemon=True)
+        feeder.start()
+        try:
+            for oid in oids:
+                header = proc.stdout.readline().split()
+                if len(header) != 3 or header[0].decode() != oid:
+                    raise GitError(f"git cat-file --batch: unexpected answer for {oid}: {header!r}")
+                size = int(header[2])
+                data = proc.stdout.read(size)
+                if len(data) != size or proc.stdout.read(1) != b"\n":
+                    raise GitError(f"git cat-file --batch: short read for {oid}")
+                yield data
+        finally:
+            if proc.poll() is None and feeder.is_alive():
+                proc.kill()  # stopped early: unblock the feeder
+            feeder.join(timeout=self.timeout_s)
+            proc.stdout.close()
+            try:
+                proc.wait(timeout=self.timeout_s)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
 
     def rev_parse(self, ref: str, cwd: Path | None = None) -> str:
         return self.run("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", cwd=cwd).stdout.strip()

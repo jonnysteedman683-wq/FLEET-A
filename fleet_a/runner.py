@@ -199,7 +199,7 @@ class AgentRunner:
                 if lost.is_set():
                     return
                 if not passed:
-                    tip = self.workspaces.git.rev_parse(f"refs/heads/{a.target_branch}")
+                    tip = self.workspaces.target_tip(a.target_branch)
                     if tip == worktree.base:
                         # Rework with the test output; nothing newer on the target could fix it.
                         self.coord.fail(a.task.id, a.token, f"verify_failed before review: {output}", cost_usd=cost)

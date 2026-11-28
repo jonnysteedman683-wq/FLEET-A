@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -18,15 +19,15 @@ from .coordinator import Coordinator, SystemClock
 from .dag import TaskGraph
 from .errors import FleetError
 from .events import EventLog, project_states
-from .executors import ClaudeCodeExecutor
+from .executors import ClaudeCodeExecutor, Executor
 from .git import Git
 from .guard import RepoGuard
 from .mergequeue import MergeQueue, landed_tasks
-from .model import AgentInfo, Plan, Role, TaskState, format_usd, micros_to_usd
+from .model import AgentInfo, Plan, Role, TaskState, format_usd, is_ref_safe_id, micros_to_usd
 from .planner import plan_goal
 from .runner import AgentRunner, Fleet
 from .sim import SimConfig, simulate
-from .workspaces import Workspaces
+from .workspaces import Workspaces, create_worker_clone
 
 
 def _load_json(path: str) -> Any:
@@ -91,6 +92,13 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_clones_dir(worktrees: Path, run_id: str) -> Path:
+    """Where one run keeps its worker and reviewer clones. Runs never share them."""
+    if not is_ref_safe_id(run_id, max_len=128) or "/" in run_id:
+        raise FleetError(f"invalid run id {run_id!r}")
+    return Path(worktrees) / "clones" / run_id
+
+
 def build_fleet(
     repo: Path,
     plan: Plan,
@@ -99,16 +107,30 @@ def build_fleet(
     events_path: Path | None,
     worktrees: Path,
     claude_binary: str,
+    executor: Executor | None = None,
 ) -> tuple[Coordinator, Fleet]:
     git = Git(repo, name=config.git_name, email=config.git_email)
     git.rev_parse(f"refs/heads/{config.target_branch}")
-    workspaces = Workspaces(git, worktrees)
     guard = RepoGuard(git, config.target_branch)
-    merge_queue = MergeQueue(
-        git, workspaces, config.target_branch, config.verify_command, config.verify_timeout_s, guard=guard
-    )
-    executor = ClaudeCodeExecutor(claude_binary)
+    executor = executor or ClaudeCodeExecutor(claude_binary)
     coordinator = Coordinator(plan, config, SystemClock(), EventLog(events_path, fsync=True))
+    # Workers and reviewers each get worktrees of their own clone, made for this run only; only the
+    # integrator touches ``repo``. Reviewers fetch each commit from the worker clone by id, so no
+    # filter or hook a worker plants in its clone changes what a reviewer sees.
+    clones = run_clones_dir(worktrees, coordinator.run_id)
+    worker_git = create_worker_clone(git, clones / "worker.git")
+    review_git = create_worker_clone(git, clones / "reviewer.git")
+    workspaces = Workspaces(worker_git, worktrees / "work", upstream=git)
+    review_workspaces = Workspaces(review_git, worktrees / "review", commits_from=worker_git)
+    merge_queue = MergeQueue(
+        git,
+        Workspaces(git, worktrees / "integrator"),
+        config.target_branch,
+        config.verify_command,
+        config.verify_timeout_s,
+        guard=guard,
+        source=worker_git,
+    )
     runners = []
     for pool in config.agents:
         for agent_id in pool.agent_ids():
@@ -120,7 +142,7 @@ def build_fleet(
                     config,
                     executor=executor if pool.role is not Role.INTEGRATOR else None,
                     triage_executor=executor if pool.role is Role.WORKER else None,
-                    workspaces=workspaces,
+                    workspaces=review_workspaces if pool.role is Role.REVIEWER else workspaces,
                     merge_queue=merge_queue if pool.role is Role.INTEGRATOR else None,
                     guard=guard,
                 )
@@ -142,8 +164,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     coordinator, fleet = build_fleet(
         repo, plan, config, events_path=events_path, worktrees=worktrees, claude_binary=args.claude
     )
-    report = fleet.run(timeout_s=args.timeout)
-    coordinator.events.close()
+    try:
+        report = fleet.run(timeout_s=args.timeout)
+    finally:
+        coordinator.events.close()
+        shutil.rmtree(run_clones_dir(worktrees, coordinator.run_id), ignore_errors=True)
     _emit(
         {
             "finished": report.finished,
