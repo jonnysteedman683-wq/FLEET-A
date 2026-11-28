@@ -28,11 +28,12 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 from .git import Git
 from .guard import RepoGuard
 from .model import MergeOutcome, MergeStatus
+from .sandbox import ContainerSandbox
 from .scopes import scope_violations
 from .workspaces import Workspaces
 
@@ -63,9 +64,13 @@ class MergeQueue:
         verify_timeout_s: float,
         guard: RepoGuard | None = None,
         source: Git | None = None,
+        sandbox: ContainerSandbox | None = None,
     ) -> None:
         self.guard = guard
         self.source = source
+        # Only the export of a worker clone's commit is sandboxed: it is all a container needs.
+        # Without ``source`` verify runs in a scratch worktree, whose .git leads to the landing repo.
+        self.sandbox = sandbox if source is not None else None
         self.git = git
         self.workspaces = workspaces
         self.target_ref = f"refs/heads/{target_branch}"
@@ -219,7 +224,7 @@ class MergeQueue:
 
 
     def verify(self, path: Path, *, cancel: threading.Event | None = None) -> tuple[bool, str]:
-        return run_verify(self.verify_command, self.verify_timeout_s, path, cancel)
+        return run_verify(self.verify_command, self.verify_timeout_s, path, cancel, sandbox=self.sandbox)
 
 
 def run_verify(
@@ -228,17 +233,20 @@ def run_verify(
     path: Path,
     cancel: threading.Event | None = None,
     poll_s: float = 0.2,
+    sandbox: ContainerSandbox | None = None,
 ) -> tuple[bool, str]:
     """Run the verify command in ``path``: (passed, tail of its output). No command always passes.
 
     The command runs in its own process group. On timeout, or once ``cancel`` is set (a worker
-    whose lease was lost), the whole group is killed and the run counts as failed.
+    whose lease was lost), the whole group is killed and the run counts as failed. With a
+    ``sandbox`` it runs in a container that mounts only ``path``, which is removed after a kill.
     """
     if not command:
         return True, "no verify command configured"
+    argv, cleanup = (list(command), None) if sandbox is None else sandbox.wrap(command, path)
     try:
         proc = subprocess.Popen(
-            list(command),
+            argv,
             cwd=str(path),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -254,14 +262,22 @@ def run_verify(
             return proc.returncode == 0, _tail(out + "\n" + err)
         except subprocess.TimeoutExpired:
             if cancel is not None and cancel.is_set():
-                _kill_group(proc)
+                _kill_group(proc, cleanup)
                 return False, "verify command cancelled: lease lost"
             if time.monotonic() >= deadline:
-                _kill_group(proc)
+                _kill_group(proc, cleanup)
                 return False, f"verify command timed out after {timeout_s:.0f}s"
 
 
-def _kill_group(proc: subprocess.Popen[str], grace_s: float = 5.0) -> None:
+def _kill_group(proc: subprocess.Popen[str], cleanup: Callable[[], None] | None = None, grace_s: float = 5.0) -> None:
+    try:
+        _kill_process_group(proc, grace_s)
+    finally:
+        if cleanup is not None:
+            cleanup()  # a container keeps running when only its engine client is killed
+
+
+def _kill_process_group(proc: subprocess.Popen[str], grace_s: float) -> None:
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(proc.pid, sig)

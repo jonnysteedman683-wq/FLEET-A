@@ -27,6 +27,7 @@ from .model import AgentInfo, Plan, Role, TaskState, format_usd, is_ref_safe_id,
 from .planner import plan_goal
 from .runner import AgentRunner, Fleet
 from .sim import SimConfig, simulate
+from .sandbox import make_sandbox
 from .workspaces import Workspaces, create_worker_clone
 
 
@@ -147,6 +148,7 @@ def build_fleet(
         config.verify_timeout_s,
         guard=guard,
         source=worker_git,
+        sandbox=make_sandbox(config.verify_image, config.verify_sandbox) if config.verify_command else None,
     )
     runners = []
     for pool in config.agents:

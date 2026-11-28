@@ -34,10 +34,22 @@ python3 -m fleet_a verify-log ../.fleet-a-<plan-id>/events.jsonl
 
 Use a dedicated clone of the repository with the target branch not checked out. Push the target branch yourself after reviewing the run summary.
 
+## Sandbox the integrator's verify (optional, free)
+
+The integrator runs `verify_command` on code that only a reviewer has read. Give it a container image and it runs that command in a throwaway container that sees only the exported tree, with networking off. Podman is preferred because it runs rootless; Docker works too. Both are free: Podman everywhere, Docker Engine on Linux, and Podman Desktop on macOS and Windows.
+
+```bash
+sudo apt install podman     # macOS: brew install podman && podman machine init && podman machine start
+printf 'FROM docker.io/library/python:3.12-slim\nRUN pip install --no-cache-dir pytest\n' > Containerfile
+podman build -t myrepo-verify .   # add whatever else your tests import to the RUN line
+```
+
+Then add `"verify_image": "myrepo-verify"` to the config. The container has no network, so the image must already contain every tool and library the tests need. If neither Podman nor Docker is running, verify runs as before and FLEET-A logs a warning. Set `"verify_sandbox": "podman"` to make a missing engine an error instead.
+
 ## Verify the design
 
 ```bash
-python3 -m pytest -q                          # 231 tests, about 40 s
+python3 -m pytest -q                          # 243 tests, about 40 s
 python3 -m fleet_a simulate --runs 200        # randomized fault-injection runs; exits 1 on any violation
 ```
 
