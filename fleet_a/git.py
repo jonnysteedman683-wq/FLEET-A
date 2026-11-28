@@ -87,10 +87,9 @@ class Git:
         and checked out as their blobs. It needs git 2.42 or later, which is checked here because
         older versions ignore the variable silently.
         """
-        version = self.run("version").stdout.split()[-1]
-        numbers = tuple(int(part) for part in re.findall(r"\d+", version)[:2])
-        if numbers < (2, 42):
-            raise GitError(f"the integrator needs git 2.42 or later to ignore in-tree attributes, found {version}")
+        version = self.run("version").stdout.strip()
+        if git_version(version) < (2, 42):
+            raise GitError(f"the integrator needs git 2.42 or later to ignore in-tree attributes, found {version!r}")
         empty_tree = self.run("hash-object", "-t", "tree", "--stdin", input="").stdout.strip()
         self.env["GIT_ATTR_SOURCE"] = empty_tree
 
@@ -156,3 +155,12 @@ class Git:
     def zero_oid(self) -> str:
         fmt = self.run("rev-parse", "--show-object-format", check=False).stdout.strip()
         return "0" * (64 if fmt == "sha256" else 40)
+
+
+def git_version(output: str) -> tuple[int, int]:
+    """(major, minor) from ``git version`` output, or (0, 0) if it can't be read.
+
+    Read from the start: Apple's git appends "(Apple Git-154)", whose number is not git's version.
+    """
+    match = re.match(r"git version (\d+)\.(\d+)", output.strip())
+    return (int(match[1]), int(match[2])) if match else (0, 0)

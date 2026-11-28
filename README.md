@@ -49,7 +49,7 @@ Then add `"verify_image": "myrepo-verify"` to the config. The container has no n
 ## Verify the design
 
 ```bash
-python3 -m pytest -q                          # 243 tests, about 40 s
+python3 -m pytest -q                          # 249 tests, about 40 s
 python3 -m fleet_a simulate --runs 200        # randomized fault-injection runs; exits 1 on any violation
 ```
 

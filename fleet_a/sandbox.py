@@ -38,7 +38,8 @@ class ContainerSandbox:
 
     @property
     def rootless_podman(self) -> bool:
-        return Path(self.engine).name == "podman"
+        # keep-id exists only in rootless mode; Podman run as root is treated like Docker.
+        return Path(self.engine).name == "podman" and os.geteuid() != 0
 
     def argv(self, command: Sequence[str], path: Path, name: str) -> list[str]:
         """The ``<engine> run`` command that runs ``command`` with only ``path`` mounted."""

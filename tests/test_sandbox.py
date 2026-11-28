@@ -69,7 +69,8 @@ def engines(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("engine", ["podman", "docker"])
-def test_the_container_sees_only_the_export_with_no_network(tmp_path, engine):
+def test_the_container_sees_only_the_export_with_no_network(tmp_path, monkeypatch, engine):
+    monkeypatch.setattr("os.geteuid", lambda: 1000)  # rootless
     export = tmp_path / "export"
     export.mkdir()
     argv = ContainerSandbox(engine, IMAGE).argv(["pytest", "-q"], export, "n1")
@@ -211,3 +212,42 @@ def test_build_fleet_sandboxes_the_integrator_when_an_engine_is_there(repo, tmp_
     assert len(queues) == 1
     (mq,) = queues.values()
     assert mq.sandbox is not None and Path(mq.sandbox.engine).name == "podman"
+
+
+def test_podman_run_as_root_gets_a_user_not_keep_id(tmp_path, monkeypatch):
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    argv = ContainerSandbox("podman", IMAGE).argv(["true"], tmp_path, "n1")
+    assert "--userns=keep-id" not in argv and "--user" in argv
+
+
+@pytest.mark.parametrize(
+    "output, version",
+    [
+        ("git version 2.43.0", (2, 43)),
+        ("git version 2.39.5 (Apple Git-154)", (2, 39)),
+        ("git version 2.42.0.windows.2", (2, 42)),
+        ("something else", (0, 0)),
+    ],
+)
+def test_git_version_is_read_from_the_start_of_the_output(output, version):
+    from fleet_a.git import git_version
+
+    assert git_version(output) == version
+
+
+def test_apple_git_239_is_refused_for_the_integrator(repo, monkeypatch):
+    import subprocess as sp
+
+    from fleet_a.git import Git
+    from fleet_a.errors import GitError
+
+    real = Git.run
+
+    def fake(self, *args, **kw):
+        if args == ("version",):
+            return sp.CompletedProcess(["git", "version"], 0, "git version 2.39.5 (Apple Git-154)\n", "")
+        return real(self, *args, **kw)
+
+    monkeypatch.setattr(Git, "run", fake)
+    with pytest.raises(GitError, match="2.42"):
+        Git(repo, tree_attributes=False)
